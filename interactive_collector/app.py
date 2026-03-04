@@ -28,6 +28,7 @@ from flask import Flask, redirect, request, render_template_string, send_from_di
 
 from interactive_collector.collector_state import get_result_by_drpid as _get_result_by_drpid
 from interactive_collector.collector_state import get_scoreboard as _get_scoreboard
+from utils.Args import Args
 from utils.file_utils import create_output_folder, sanitize_filename
 from utils.url_utils import (
     body_looks_like_html,
@@ -39,6 +40,12 @@ from utils.url_utils import (
     resolve_catalog_resource_url,
     BROWSER_HEADERS,
 )
+
+# When run via Flask (e.g. flask --app interactive_collector.app run), the Typer CLI
+# is not used so Args.initialize() is never called. Initialize from config only so
+# db_path, base_output_dir, etc. are loaded from config.json (default ./config.json).
+if not getattr(Args, "_initialized", False):
+    Args.initialize_from_config()
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB for extension PDF uploads

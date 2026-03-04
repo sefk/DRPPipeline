@@ -155,6 +155,27 @@ class Args(metaclass=ArgsMeta):
         cls._initialized = True
 
     @classmethod
+    def initialize_from_config(cls, config_path: Optional[Path] = None) -> None:
+        """
+        Initialize from defaults and config file only (no CLI parsing).
+        Use when the app is run without the Typer CLI (e.g. Flask, pytest).
+        """
+        if cls._initialized:
+            return
+        cls._config = dict(cls._defaults)
+        if config_path is None:
+            config_path = Path("./config.json")
+        if not isinstance(config_path, Path):
+            config_path = Path(config_path)
+        if config_path.exists():
+            cls._load_config_file(config_path)
+        gwda_email = cls._config.get("gwda_email") or cls._config.get("datalumos_username")
+        cls._config["gwda_email"] = gwda_email
+        if os.environ.get("DRP_STOP_FILE"):
+            cls._config["stop_file"] = os.environ["DRP_STOP_FILE"]
+        cls._initialized = True
+
+    @classmethod
     def _parse_command_line(cls) -> Dict[str, Any]:
         """
         Parse command line arguments using Typer.

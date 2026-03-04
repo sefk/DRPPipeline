@@ -77,7 +77,7 @@ class SpreadsheetCandidateFetcher:
         """
         claimed = (row.get("Claimed (add your name)") or "").strip()
         download_location = (row.get("Download Location") or "").strip()
-        return claimed == "" and download_location == "" and (row.get("URL") or "").strip().startswith("https://catalog.data.gov/")
+        return claimed == "" and download_location == "" # and (row.get("URL") or "").strip().startswith("https://catalog.data.gov/")
 
     def _extract_urls_from_csv(
         self, csv_text: str, url_column: str, num_rows: int | None = None

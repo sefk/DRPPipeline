@@ -299,8 +299,12 @@ def metadata_from_page_route() -> Any:
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Allow-Private-Network": "true",
         }
-    cors_headers = {"Access-Control-Allow-Origin": "*"}
+    cors_headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Private-Network": "true",
+    }
     if request.method == "POST":
         if request.is_json:
             data = request.get_json() or {}

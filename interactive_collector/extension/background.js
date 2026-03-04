@@ -34,6 +34,14 @@ function stopWatcher(collectorBase) {
     .then(data => ({ ok: !!data.ok }));
 }
 
+function postMetadataFromPage(collectorBase, payload) {
+  return fetch(`${collectorBase}/api/metadata-from-page`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).then(r => r.json().catch(() => ({}))).then(data => ({ ok: !!data.ok }));
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "drp-watcher-status") {
     const { collectorBase } = msg;
@@ -70,6 +78,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === "drp-metadata-from-page") {
+    const { collectorBase, payload } = msg;
+    if (!collectorBase || !payload) {
+      sendResponse({ ok: false });
+      return true;
+    }
+    postMetadataFromPage(collectorBase, payload).then(sendResponse).catch(() => sendResponse({ ok: false }));
+    return true;
+  }
   if (msg.type === "drp-print-to-pdf") {
     const { collectorBase, drpid, url, referrer, title } = msg;
     const tabId = sender.tab && sender.tab.id;

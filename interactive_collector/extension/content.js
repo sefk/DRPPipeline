@@ -53,32 +53,77 @@
     }
   }
 
+  function isCmsDomain() {
+    try {
+      return (window.location.hostname || "").indexOf("data.cms.gov") !== -1;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function extractMetadataFromPage() {
     var meta = {};
     var el;
-    // Title: h1[itemprop="name"] (dataset title, not generic h1)
-    el = document.querySelector('h1[itemprop="name"]');
-    if (el && el.textContent) meta.title = el.textContent.trim();
+    var isCms = isCmsDomain();
+
+    if (isCms) {
+      // data.cms.gov selectors (SPA; often need delay before extract)
+      el = document.querySelector("h1");
+      if (el && el.textContent) meta.title = el.textContent.trim();
+      el = document.querySelector("div.DatasetPage__summary-field-summary-container") ||
+           document.querySelector("div[class*='DatasetPage__summary']");
+      if (el && el.innerHTML) meta.summary = el.innerHTML.trim();
+      el = document.querySelector("ul.DatasetDetails__tags") ||
+           document.querySelector("ul[class*='DatasetDetails__tags']") ||
+           document.querySelector("div.DatasetDetails__tags") ||
+           document.querySelector("div[class*='DatasetDetails__tags']");
+      if (el) {
+        var tagEls = el.querySelectorAll("a");
+        if (tagEls.length) {
+          meta.keywords = Array.prototype.map.call(tagEls, function (n) { return n.textContent.trim(); }).filter(Boolean).join("; ");
+        }
+        if (!meta.keywords && el.textContent) meta.keywords = el.textContent.trim();
+      }
+      el = document.querySelector("div.DatasetHero__meta-container > div:nth-child(3) > span:nth-child(2)") ||
+           document.querySelector("div[class*='DatasetHero__meta-container'] div:nth-child(3) span:nth-child(2)");
+      if (el && el.textContent) meta.agency = el.textContent.trim();
+      if (!meta.agency) {
+        var hero = document.querySelector("div[class*='DatasetHero__meta-container']");
+        if (hero) {
+          var spans = hero.querySelectorAll("span");
+          if (spans.length >= 2) meta.agency = spans[1].textContent.trim();
+        }
+      }
+    }
+
+    if (!meta.title) {
+      el = document.querySelector('h1[itemprop="name"]');
+      if (el && el.textContent) meta.title = el.textContent.trim();
+    }
     if (!meta.title) {
       el = document.querySelector("h2.asset-name");
       if (el && el.textContent) meta.title = el.textContent.trim();
     }
     if (!meta.title && document.title) meta.title = document.title.trim();
-    // Description: Socrata uses div.description-section (see SocrataMetadataExtractor)
-    el = document.querySelector("div.description-section");
-    if (el && el.innerHTML) meta.summary = el.innerHTML.trim();
+
+    if (!meta.summary) {
+      el = document.querySelector("div.description-section");
+      if (el && el.innerHTML) meta.summary = el.innerHTML.trim();
+    }
     if (!meta.summary) {
       el = document.querySelector('div[itemprop="description"]');
       if (el && el.innerHTML) meta.summary = el.innerHTML.trim();
     }
-    // Keywords: section.tags – all tag items, semicolon delimited
-    var tagsSection = document.querySelector("section.tags");
-    if (tagsSection) {
-      var tagEls = tagsSection.querySelectorAll("a");
-      if (tagEls.length) {
-        meta.keywords = Array.prototype.map.call(tagEls, function (n) { return n.textContent.trim(); }).filter(Boolean).join("; ");
+
+    if (!meta.keywords) {
+      var tagsSection = document.querySelector("section.tags");
+      if (tagsSection) {
+        var tagEls = tagsSection.querySelectorAll("a");
+        if (tagEls.length) {
+          meta.keywords = Array.prototype.map.call(tagEls, function (n) { return n.textContent.trim(); }).filter(Boolean).join("; ");
+        }
+        if (!meta.keywords && tagsSection.textContent) meta.keywords = tagsSection.textContent.trim();
       }
-      if (!meta.keywords && tagsSection.textContent) meta.keywords = tagsSection.textContent.trim();
     }
     if (!meta.keywords) {
       var kwNodes = document.querySelectorAll('[itemprop="keywords"]');
@@ -86,20 +131,26 @@
         meta.keywords = Array.prototype.map.call(kwNodes, function (n) { return n.textContent.trim(); }).filter(Boolean).join("; ");
       }
     }
-    el = document.querySelector('[itemprop="publisher"]');
-    if (el) {
-      var name = el.getAttribute("content") || (el.querySelector("[itemprop='name']") && el.querySelector("[itemprop='name']").textContent) || el.textContent;
-      if (name && name.trim()) meta.agency = name.trim();
+
+    if (!meta.agency) {
+      el = document.querySelector('[itemprop="publisher"]');
+      if (el) {
+        var name = el.getAttribute("content") || (el.querySelector("[itemprop='name']") && el.querySelector("[itemprop='name']").textContent) || el.textContent;
+        if (name && name.trim()) meta.agency = name.trim();
+      }
     }
-    el = document.querySelector(".dataset-office, [data-field='organization'] .value, .publisher-name");
-    if (el && el.textContent) meta.office = el.textContent.trim();
+    if (!meta.office) {
+      el = document.querySelector(".dataset-office, [data-field='organization'] .value, .publisher-name");
+      if (el && el.textContent) meta.office = el.textContent.trim();
+    }
     if (!meta.office && meta.agency) meta.office = meta.agency;
+
     var today = new Date();
     meta.download_date = today.getFullYear() + "-" + String(today.getMonth() + 1).padStart(2, "0") + "-" + String(today.getDate()).padStart(2, "0");
     return meta;
   }
 
-  function sendMetadataFromPageIfSource(collectorBase, drpid, sourcePageUrl) {
+  function doSendMetadataFromPage(collectorBase, drpid, sourcePageUrl) {
     if (!sourcePageUrl) return;
     var currentKey = urlOriginAndPath(window.location.href);
     var sourceKey = urlOriginAndPath(sourcePageUrl);
@@ -107,14 +158,25 @@
     var meta = extractMetadataFromPage();
     meta.drpid = parseInt(drpid, 10);
     if (Object.keys(meta).length <= 1) return;
-    var url = collectorBase + "/api/metadata-from-page";
-    fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(meta),
-    }).then(function () {
-      chrome.storage.local.remove(["sourcePageUrl"]).catch(function () {});
-    }).catch(function () {});
+    // POST via background script so the request is from the extension (localhost allowed), not the page (blocked by Private Network Access)
+    chrome.runtime.sendMessage(
+      { type: "drp-metadata-from-page", collectorBase: collectorBase, payload: meta },
+      function (response) {
+        if (response && response.ok) {
+          chrome.storage.local.remove(["sourcePageUrl"]).catch(function () {});
+        }
+      }
+    );
+  }
+
+  function sendMetadataFromPageIfSource(collectorBase, drpid, sourcePageUrl) {
+    if (!collectorBase || !drpid || !sourcePageUrl) return;
+    // data.cms.gov is likely a SPA; wait for JS to render before extracting
+    if (isCmsDomain()) {
+      setTimeout(function () { doSendMetadataFromPage(collectorBase, drpid, sourcePageUrl); }, 3000);
+      return;
+    }
+    doSendMetadataFromPage(collectorBase, drpid, sourcePageUrl);
   }
 
   function clearWatcherPoll() {
