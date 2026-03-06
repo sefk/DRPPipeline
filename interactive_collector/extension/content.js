@@ -84,15 +84,17 @@
         }
         if (!meta.keywords && el.textContent) meta.keywords = el.textContent.trim();
       }
-      el = document.querySelector("div.DatasetHero__meta-container > div:nth-child(3) > span:nth-child(2)") ||
-           document.querySelector("div[class*='DatasetHero__meta-container'] div:nth-child(3) span:nth-child(2)");
-      if (el && el.textContent) meta.agency = el.textContent.trim();
-      if (!meta.agency) {
-        var hero = document.querySelector("div[class*='DatasetHero__meta-container']");
-        if (hero) {
-          var spans = hero.querySelectorAll("span");
-          if (spans.length >= 2) meta.agency = spans[1].textContent.trim();
+      // Agency: div.DatasetHero__meta with <span>Data source</span> and sibling <span>agency name</span>
+      var metaDivs = document.querySelectorAll("div.DatasetHero__meta, div[class*='DatasetHero__meta']");
+      for (var d = 0; d < metaDivs.length; d++) {
+        var spans = metaDivs[d].querySelectorAll("span");
+        for (var s = 0; s < spans.length; s++) {
+          if (spans[s].textContent.trim().toLowerCase().indexOf("data source") !== -1 && spans[s].nextElementSibling) {
+            meta.agency = spans[s].nextElementSibling.textContent.trim();
+            break;
+          }
         }
+        if (meta.agency) break;
       }
     }
 
@@ -157,6 +159,7 @@
     if (currentKey !== sourceKey) return;
     var meta = extractMetadataFromPage();
     meta.drpid = parseInt(drpid, 10);
+    delete meta.office;
     if (Object.keys(meta).length <= 1) return;
     // POST via background script so the request is from the extension (localhost allowed), not the page (blocked by Private Network Access)
     chrome.runtime.sendMessage(

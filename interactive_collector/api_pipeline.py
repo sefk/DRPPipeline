@@ -3,11 +3,14 @@ Flask API for running pipeline modules from the SPA main page.
 
 Exposes: list modules, run a module (subprocess with streamed log output), stop running module.
 Progress is streamed to the client and echoed to stderr so it appears in the Flask terminal.
+Sends a keepalive comment when the subprocess is silent so proxies/browsers don't close the connection.
 """
 
 import os
+import queue
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Generator, Optional
 
@@ -99,8 +102,8 @@ def run_module() -> Any:
     def stream() -> Generator[str, None, None]:
         global _current_proc
         proc: Optional[subprocess.Popen[str]] = None
+        keepalive_interval = 20.0  # Send something every N seconds so connection isn't dropped
         try:
-            # Remove stop file from any previous run; pass path to subprocess so orchestrator can check it
             try:
                 if _STOP_FILE.exists():
                     _STOP_FILE.unlink()
@@ -108,7 +111,7 @@ def run_module() -> Any:
                 pass
             env = os.environ.copy()
             env["DRP_STOP_FILE"] = str(_STOP_FILE)
-            env["PYTHONUNBUFFERED"] = "1"  # So log lines appear in main-page stream immediately
+            env["PYTHONUNBUFFERED"] = "1"
             proc = subprocess.Popen(
                 argv,
                 cwd=str(_PROJECT_ROOT),
@@ -122,7 +125,30 @@ def run_module() -> Any:
             )
             _current_proc = proc
             assert proc.stdout is not None
-            for line in proc.stdout:
+            out_queue: "queue.Queue[Optional[str]]" = queue.Queue()
+            sentinel: Optional[str] = None
+
+            def reader() -> None:
+                try:
+                    for line in proc.stdout:
+                        out_queue.put(line)
+                except Exception:
+                    pass
+                out_queue.put(sentinel)
+
+            t = threading.Thread(target=reader, daemon=True)
+            t.start()
+            while True:
+                try:
+                    line = out_queue.get(timeout=keepalive_interval)
+                except queue.Empty:
+                    line = "\n"
+                    sys.stderr.write(line)
+                    sys.stderr.flush()
+                    yield line
+                    continue
+                if line is None:
+                    break
                 sys.stderr.write(line)
                 sys.stderr.flush()
                 yield line
