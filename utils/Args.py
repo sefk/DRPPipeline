@@ -79,8 +79,8 @@ class Args(metaclass=ArgsMeta):
         "datalumos_password": None,  # Required for upload; set in config file
         "upload_headless": False,  # Run browser in headless mode for upload
         "upload_timeout": 60000,  # Default timeout in ms for upload operations
-        # GWDA nomination (before DataLumos upload)
-        "gwda_your_name": "Michael Kraley",
+        # GWDA nomination (before DataLumos upload; gwda_your_name required in config)
+        "gwda_your_name": "",
         "gwda_institution": "Data Rescue Project",
         "gwda_email": None,  # Uses datalumos_username if not set
         # Sourcing + Publisher: Google Sheet (same sheet used for candidate URLs and inventory updates)

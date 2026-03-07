@@ -6,7 +6,6 @@ and uploading to various repositories, e.g. DataLumos.
 """
 
 import sys
-from pathlib import Path
 
 import click
 

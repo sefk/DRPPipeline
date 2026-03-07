@@ -12,6 +12,8 @@ from storage import Storage
 from utils.Args import Args
 from utils.Logger import Logger
 
+from utils.project_utils import get_field
+
 from publisher.DataLumosPublisher import DataLumosPublisher, PUBLISHED_URL_TEMPLATE
 
 
@@ -50,10 +52,10 @@ class TestDataLumosPublisher(unittest.TestCase):
                 pass
 
     def test_get_field(self) -> None:
-        """Test _get_field returns trimmed value or empty string."""
+        """Test get_field returns trimmed value or empty string."""
         project = {"datalumos_id": "  12345  ", "missing": None}
-        self.assertEqual(self.publisher._get_field(project, "datalumos_id"), "12345")
-        self.assertEqual(self.publisher._get_field(project, "missing"), "")
+        self.assertEqual(get_field(project, "datalumos_id"), "12345")
+        self.assertEqual(get_field(project, "missing"), "")
 
     def test_project_url(self) -> None:
         """Test _project_url builds correct workspace URL."""

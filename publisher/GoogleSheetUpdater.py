@@ -7,7 +7,7 @@ Logic derived from chiara_upload.update_google_sheet().
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from utils.Args import Args
 from utils.Logger import Logger
@@ -57,23 +57,26 @@ class GoogleSheetUpdater:
     Claimed, Data Added, Download Location, Date Downloaded, etc.
     """
 
-    def update(
+    def _update_row(
         self,
         source_url: str,
-        workspace_id: str,
-        project: Dict[str, Any],
-    ) -> tuple[bool, Optional[str]]:
+        required_columns: List[str],
+        optional_columns: Optional[List[str]],
+        build_requests: Callable[..., List[Dict[str, Any]]],
+        log_suffix: str = "",
+        **build_kwargs: Any,
+    ) -> Tuple[bool, Optional[str]]:
         """
-        Update the Google Sheet row matching source_url with publishing data.
-        Reads Args for google_sheet_id, google_credentials, google_sheet_name, google_username.
+        Shared logic: validate, get service, map columns, find row, build requests, batchUpdate.
 
         Args:
-            source_url: Source URL to match in the URL column.
-            workspace_id: DataLumos workspace ID (for Download Location).
-            project: Project dict (download_date, file_size, extensions).
-
-        Returns:
-            (True, None) on success, (False, error_message) on failure.
+            source_url: URL to match in sheet
+            required_columns: Required column names
+            optional_columns: Optional column names
+            build_requests: Callable that returns list of update dicts. Called with
+                (sheet_name, row_number, column_map, **build_kwargs).
+            log_suffix: Suffix for debug/info logs (e.g. " (not_found/no_links)")
+            **build_kwargs: Passed to build_requests
         """
         if not _GOOGLE_SHEETS_AVAILABLE:
             return False, (
@@ -99,7 +102,7 @@ class GoogleSheetUpdater:
             service = build("sheets", "v4", credentials=credentials)
 
             column_map = self._get_column_mapping(
-                service, sheet_id, sheet_name, _REQUIRED_COLUMNS
+                service, sheet_id, sheet_name, required_columns, optional_columns
             )
             if not column_map:
                 raise ValueError("Failed to get column mapping from Google Sheet")
@@ -113,11 +116,15 @@ class GoogleSheetUpdater:
             if not row_number:
                 return False, f"Could not find row with matching URL: {source_url}"
 
-            Logger.debug(f"Updating Google Sheet row {row_number}")
+            Logger.debug(f"Updating Google Sheet row {row_number}{log_suffix}")
 
-            username = Args.google_username
-            update_requests = self._build_update_requests(
-                sheet_name, row_number, column_map, workspace_id, project, username
+            update_requests = build_requests(
+                sheet_name=sheet_name,
+                row_number=row_number,
+                column_map=column_map,
+                service=service,
+                sheet_id=sheet_id,
+                **build_kwargs,
             )
             if not update_requests:
                 return False, "No data to update"
@@ -129,19 +136,60 @@ class GoogleSheetUpdater:
             ).execute()
 
             Logger.info(
-                f"Updated Google Sheet row {row_number} with {len(update_requests)} columns"
+                f"Updated Google Sheet row {row_number}{log_suffix} with {len(update_requests)} columns"
             )
             return True, None
 
         except ValueError:
             raise
-        except FileNotFoundError as e:
+        except FileNotFoundError:
             return False, f"Credentials file not found: {credentials_path}"
         except HttpError as e:
             return False, f"Google Sheets API error: {e}"
         except Exception as e:
-            Logger.warning(f"Error updating Google Sheet: {e}")
+            Logger.warning(f"Error updating Google Sheet{log_suffix}: {e}")
             return False, str(e)
+
+    def update(
+        self,
+        source_url: str,
+        workspace_id: str,
+        project: Dict[str, Any],
+    ) -> tuple[bool, Optional[str]]:
+        """
+        Update the Google Sheet row matching source_url with publishing data.
+        Reads Args for google_sheet_id, google_credentials, google_sheet_name, google_username.
+
+        Args:
+            source_url: Source URL to match in the URL column.
+            workspace_id: DataLumos workspace ID (for Download Location).
+            project: Project dict (download_date, file_size, extensions).
+
+        Returns:
+            (True, None) on success, (False, error_message) on failure.
+        """
+        def _build(
+            sheet_name: str,
+            row_number: int,
+            column_map: Dict[str, str],
+            workspace_id: str,
+            project: Dict[str, Any],
+            username: str,
+            **kwargs: Any,
+        ) -> List[Dict[str, Any]]:
+            return self._build_update_requests(
+                sheet_name, row_number, column_map, workspace_id, project, username
+            )
+
+        return self._update_row(
+            source_url=source_url,
+            required_columns=_REQUIRED_COLUMNS,
+            optional_columns=None,
+            build_requests=_build,
+            workspace_id=workspace_id,
+            project=project,
+            username=Args.google_username or "",
+        )
 
     def update_for_not_found_or_no_links(
         self,
@@ -163,119 +211,72 @@ class GoogleSheetUpdater:
         Returns:
             (True, None) on success, (False, error_message) on failure.
         """
-        if not _GOOGLE_SHEETS_AVAILABLE:
-            return False, (
-                "Google Sheets API not installed. "
-                "Install with: pip install google-api-python-client google-auth google-auth-httplib2"
-            )
+        return self._update_row(
+            source_url=source_url,
+            required_columns=_REQUIRED_COLUMNS_NOT_FOUND,
+            optional_columns=["Notes"],
+            build_requests=self._build_not_found_requests,
+            log_suffix=" (not_found/no_links)",
+            notes_value=notes_value,
+        )
 
-        sheet_id = Args.google_sheet_id
-        credentials_path = Path(Args.google_credentials) if Args.google_credentials else None
-        sheet_name = Args.google_sheet_name
+    def _build_not_found_requests(
+        self,
+        sheet_name: str,
+        row_number: int,
+        column_map: Dict[str, str],
+        notes_value: str,
+        service: Any = None,
+        sheet_id: str = "",
+        **kwargs: Any,
+    ) -> List[Dict[str, Any]]:
+        """Build update requests for not_found/no_links sheet update."""
+        username = Args.google_username or ""
+        requests: List[Dict[str, Any]] = []
 
-        if not sheet_id or not credentials_path:
-            return False, "Google Sheet ID and credentials path are required"
-
-        if not source_url or not source_url.strip():
-            return False, "Source URL is required to find matching row"
-
-        try:
-            credentials = service_account.Credentials.from_service_account_file(
-                str(credentials_path),
-                scopes=["https://www.googleapis.com/auth/spreadsheets"],
-            )
-            service = build("sheets", "v4", credentials=credentials)
-
-            column_map = self._get_column_mapping(
-                service,
-                sheet_id,
-                sheet_name,
-                _REQUIRED_COLUMNS_NOT_FOUND,
-                optional_columns=["Notes"],
-            )
-            if not column_map:
-                raise ValueError("Failed to get column mapping from Google Sheet")
-            url_col_letter = column_map.get("URL")
-            if not url_col_letter:
-                raise ValueError("Could not find URL column in sheet")
-
-            row_number = self._find_row_by_url(
-                service, sheet_id, sheet_name, url_col_letter, source_url.strip()
-            )
-            if not row_number:
-                return False, f"Could not find row with matching URL: {source_url}"
-
-            Logger.debug(f"Updating Google Sheet row {row_number} (not_found/no_links)")
-
-            username = Args.google_username or ""
-            requests: List[Dict[str, Any]] = []
-
-            for col_key, col_letter in column_map.items():
-                if col_key == "URL":
-                    continue
-                if col_key == "Claimed":
-                    requests.append({
-                        "range": f"{sheet_name}!{col_letter}{row_number}",
-                        "values": [[username]],
-                    })
-                elif col_key == "Data Added":
-                    requests.append({
-                        "range": f"{sheet_name}!{col_letter}{row_number}",
-                        "values": [["N"]],
-                    })
-                elif col_key == "Dataset Download Possible?":
-                    requests.append({
-                        "range": f"{sheet_name}!{col_letter}{row_number}",
-                        "values": [["N"]],
-                    })
-                elif col_key == "Nominated to EOT / USGWDA":
-                    requests.append({
-                        "range": f"{sheet_name}!{col_letter}{row_number}",
-                        "values": [["N"]],
-                    })
-                elif col_key == "Notes":
-                    requests.append({
-                        "range": f"{sheet_name}!{col_letter}{row_number}",
-                        "values": [[notes_value]],
-                    })
-
-            # If Notes column not present, add it after the last existing column
-            if "Notes" not in column_map:
-                notes_col_letter = self._get_next_column_letter(
-                    service, sheet_id, sheet_name
-                )
+        for col_key, col_letter in column_map.items():
+            if col_key == "URL":
+                continue
+            if col_key == "Claimed":
                 requests.append({
-                    "range": f"{sheet_name}!{notes_col_letter}1",
-                    "values": [["Notes"]],
+                    "range": f"{sheet_name}!{col_letter}{row_number}",
+                    "values": [[username]],
                 })
+            elif col_key == "Data Added":
                 requests.append({
-                    "range": f"{sheet_name}!{notes_col_letter}{row_number}",
+                    "range": f"{sheet_name}!{col_letter}{row_number}",
+                    "values": [["N"]],
+                })
+            elif col_key == "Dataset Download Possible?":
+                requests.append({
+                    "range": f"{sheet_name}!{col_letter}{row_number}",
+                    "values": [["N"]],
+                })
+            elif col_key == "Nominated to EOT / USGWDA":
+                requests.append({
+                    "range": f"{sheet_name}!{col_letter}{row_number}",
+                    "values": [["N"]],
+                })
+            elif col_key == "Notes":
+                requests.append({
+                    "range": f"{sheet_name}!{col_letter}{row_number}",
                     "values": [[notes_value]],
                 })
 
-            if not requests:
-                return False, "No data to update"
-
-            body = {"valueInputOption": "USER_ENTERED", "data": requests}
-            service.spreadsheets().values().batchUpdate(
-                spreadsheetId=sheet_id,
-                body=body,
-            ).execute()
-
-            Logger.info(
-                f"Updated Google Sheet row {row_number} (not_found/no_links): {len(requests)} columns"
+        if "Notes" not in column_map and service and sheet_id:
+            notes_col_letter = self._get_next_column_letter(
+                service, sheet_id, sheet_name
             )
-            return True, None
+            requests.append({
+                "range": f"{sheet_name}!{notes_col_letter}1",
+                "values": [["Notes"]],
+            })
+            requests.append({
+                "range": f"{sheet_name}!{notes_col_letter}{row_number}",
+                "values": [[notes_value]],
+            })
 
-        except ValueError:
-            raise
-        except FileNotFoundError as e:
-            return False, f"Credentials file not found: {credentials_path}"
-        except HttpError as e:
-            return False, f"Google Sheets API error: {e}"
-        except Exception as e:
-            Logger.warning(f"Error updating Google Sheet (not_found/no_links): {e}")
-            return False, str(e)
+        return requests
 
     def _column_index_to_letter(self, col_index: int) -> str:
         """Convert 1-based column index to letter (e.g. 1 -> A, 27 -> AA)."""

@@ -102,10 +102,12 @@ class TestDataLumosUploader(unittest.TestCase):
             self.assertTrue(mock_record_error.called)
 
     def test_get_field(self) -> None:
-        """Test _get_field returns trimmed value or empty string."""
+        """Test get_field returns trimmed value or empty string."""
+        from utils.project_utils import get_field
+
         project = {"title": "  x  ", "missing": None}
-        self.assertEqual(self.uploader._get_field(project, "title"), "x")
-        self.assertEqual(self.uploader._get_field(project, "missing"), "")
+        self.assertEqual(get_field(project, "title"), "x")
+        self.assertEqual(get_field(project, "missing"), "")
 
 
 class TestDataLumosUploaderValidation(unittest.TestCase):

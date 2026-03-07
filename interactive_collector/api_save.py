@@ -14,93 +14,10 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
-from utils.file_utils import sanitize_filename
+from utils.file_utils import folder_extensions_and_size, format_file_size, sanitize_filename
 from utils.url_utils import is_valid_url
 
-
-def _folder_extensions_and_size(folder_path: Path) -> tuple[List[str], int]:
-    """Return (sorted list of unique extensions without leading dot, total size in bytes)."""
-    exts: set[str] = set()
-    total = 0
-    try:
-        for p in folder_path.iterdir():
-            if p.is_file():
-                total += p.stat().st_size
-                if p.suffix:
-                    exts.add(p.suffix.lstrip(".").lower())
-    except OSError:
-        pass
-    return (sorted(exts), total)
-
-
-def _format_file_size(size_bytes: int) -> str:
-    """Format byte count as human-friendly string (e.g. '1.2 MB')."""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    if size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    if size_bytes < 1024 * 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
-    return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
-
-
-def _page_title_or_h1(page: Any, url: str = "") -> str:
-    """Get page <title> or first <h1> text from a Playwright page; empty string if neither."""
-    try:
-        title = page.title()
-        if title and title.strip():
-            return title.strip()
-        try:
-            # In headless, title can be empty until JS runs; read <title> from DOM
-            title = page.evaluate(
-                "() => document.querySelector('title')?.textContent?.trim() || document.title?.trim() || ''"
-            )
-            if title:
-                return title
-        except Exception:
-            pass
-        try:
-            h1 = page.locator("h1").first.text_content(timeout=2000)
-            if h1 and h1.strip():
-                return h1.strip()
-        except Exception:
-            pass
-        # Fallback: last path segment or hostname from URL for a meaningful filename
-        if url:
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            path = (parsed.path or "").rstrip("/")
-            if path:
-                segment = path.split("/")[-1]
-                if segment and len(segment) < 80:
-                    return segment
-            if parsed.netloc:
-                return parsed.netloc.split(".")[0] or parsed.netloc
-    except Exception:
-        pass
-    return ""
-
-
-def _unique_pdf_basename(
-    base: str,
-    used: Dict[str, int],
-    folder_path: Optional[Path] = None,
-) -> str:
-    """Return a unique sanitized basename: base.pdf or base_1.pdf, base_2.pdf, etc.
-    When folder_path is set, skips names that already exist in the folder (no overwrite).
-    """
-    safe = sanitize_filename(base, max_length=80)
-    if not safe:
-        safe = "page"
-    key = safe.lower()
-    n = used.get(key, 0)
-    while True:
-        name = f"{safe}.pdf" if n == 0 else f"{safe}_{n}.pdf"
-        if folder_path is not None and (folder_path / name).exists():
-            n += 1
-            continue
-        used[key] = n + 1
-        return name
+from interactive_collector.pdf_utils import page_title_or_h1, unique_pdf_basename
 
 
 def save_metadata(
@@ -162,9 +79,9 @@ def save_metadata(
         values["folder_path"] = folder_path_str
         folder_path = Path(folder_path_str)
         if folder_path.is_dir():
-            exts_list, total_bytes = _folder_extensions_and_size(folder_path)
+            exts_list, total_bytes = folder_extensions_and_size(folder_path)
             values["extensions"] = ", ".join(exts_list) if exts_list else ""
-            values["file_size"] = _format_file_size(total_bytes)
+            values["file_size"] = format_file_size(total_bytes)
         else:
             values["extensions"] = ""
             values["file_size"] = ""
@@ -173,8 +90,9 @@ def save_metadata(
         values["file_size"] = ""
     try:
         Storage.update_record(drpid, values)
-    except ValueError:
-        pass
+    except ValueError as e:
+        from utils.Logger import Logger
+        Logger.warning(f"save_metadata: record not found or invalid for DRPID={drpid}: {e}")
 
 
 # PDF generation: use "commit" so we only wait for the navigation to commit (response received).
@@ -233,10 +151,10 @@ def _run_pdf_worker(
                         except Exception:
                             pass
                         page.wait_for_timeout(2000)  # extra for post-load paint
-                        base = _page_title_or_h1(page, url)
+                        base = page_title_or_h1(page, url)
                         if not base:
                             base = "page"
-                        pdf_name = _unique_pdf_basename(base, used_basenames, folder_path)
+                        pdf_name = unique_pdf_basename(base, used_basenames, folder_path)
                         pdf_path = folder_path / pdf_name
                         page.pdf(path=str(pdf_path), print_background=True)
                         saved.append(pdf_name)

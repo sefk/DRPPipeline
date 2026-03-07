@@ -6,13 +6,14 @@ Coordinates browser lifecycle, authentication, and the publish workflow.
 Publish flow derived from chiara_upload.py (Selenium) → Playwright.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 from storage import Storage
 from upload.DataLumosBrowserSession import DataLumosBrowserSession
 from utils.Args import Args
+from utils.project_utils import get_field
 from utils.Errors import record_crash, record_error
 from utils.Logger import Logger
 
@@ -65,7 +66,7 @@ class DataLumosPublisher:
             self._run_sheet_only_for_not_found_or_no_links(drpid, project, status)
             return
 
-        workspace_id = self._get_field(project, "datalumos_id")
+        workspace_id = get_field(project, "datalumos_id")
         if not workspace_id:
             record_error(drpid, "Missing datalumos_id; project must be uploaded before publish")
             return
@@ -100,14 +101,17 @@ class DataLumosPublisher:
         finally:
             self._session.close()
 
-    def _get_field(self, project: Dict[str, Any], key: str) -> str:
-        """Get and trim a project field. Returns empty string if missing."""
-        return (project.get(key) or "").strip()
-
-    def _run_sheet_only_for_not_found_or_no_links(
-        self, drpid: int, project: Dict[str, Any], status: str
+    def _update_sheet_if_configured(
+        self,
+        drpid: int,
+        project: Dict[str, Any],
+        update_fn: "Callable[[], tuple[bool, Optional[str]]]",
+        success_status: str,
     ) -> None:
-        """Update Google Sheet only for not_found/no_links; set status to updated_not_found or updated_no_links on success."""
+        """
+        If Google Sheet configured, run update_fn; on success set status to success_status.
+        Missing credentials or libraries: record_crash. Other failures: append warning.
+        """
         if not Args.google_sheet_id or not Args.google_credentials:
             return
 
@@ -121,23 +125,15 @@ class DataLumosPublisher:
             )
             return
 
-        source_url = self._get_field(project, "source_url")
+        source_url = get_field(project, "source_url")
         if not source_url:
             Logger.warning("Google Sheet update skipped: no source_url")
             return
 
-        notes_value = "Not found" if status == "not_found" else "No live links"
-        from publisher.GoogleSheetUpdater import GoogleSheetUpdater
-
-        updater = GoogleSheetUpdater()
-        success, error_message = updater.update_for_not_found_or_no_links(
-            source_url=source_url,
-            notes_value=notes_value,
-        )
+        success, error_message = update_fn()
         if success:
-            status_value = "updated_not_found" if status == "not_found" else "updated_no_links"
-            Storage.update_record(drpid, {"status": status_value})
-            Logger.info(f"Sheet updated for DRPID={drpid} ({status})")
+            Storage.update_record(drpid, {"status": success_status})
+            Logger.info(f"Sheet updated for DRPID={drpid}")
         elif error_message:
             msg_lower = error_message.lower()
             if "not installed" in msg_lower:
@@ -151,6 +147,25 @@ class DataLumosPublisher:
                 drpid, "warnings", f"Google Sheet update failed: {error_message}"
             )
 
+    def _run_sheet_only_for_not_found_or_no_links(
+        self, drpid: int, project: Dict[str, Any], status: str
+    ) -> None:
+        """Update Google Sheet only for not_found/no_links; set status to updated_not_found or updated_no_links on success."""
+        notes_value = "Not found" if status == "not_found" else "No live links"
+        status_value = "updated_not_found" if status == "not_found" else "updated_no_links"
+
+        from publisher.GoogleSheetUpdater import GoogleSheetUpdater
+
+        updater = GoogleSheetUpdater()
+
+        def _do_update() -> tuple[bool, Optional[str]]:
+            return updater.update_for_not_found_or_no_links(
+                source_url=get_field(project, "source_url"),
+                notes_value=notes_value,
+            )
+
+        self._update_sheet_if_configured(drpid, project, _do_update, status_value)
+
     def _update_google_sheet_if_configured(
         self, drpid: int, project: Dict[str, Any], workspace_id: str
     ) -> None:
@@ -160,45 +175,18 @@ class DataLumosPublisher:
         Missing credentials file or missing Google Sheets libraries: record_crash (fatal).
         Other failures (e.g. API error, row not found): append warning and continue.
         """
-        if not Args.google_sheet_id or not Args.google_credentials:
-            return
-
-        from pathlib import Path
-
-        cred_path = Path(Args.google_credentials) if isinstance(Args.google_credentials, str) else Args.google_credentials
-        if not cred_path.exists():
-            record_crash(
-                f"Google Sheet update configured but credentials file not found: {cred_path}. "
-                "Set google_credentials to a valid path or leave unset to skip sheet update."
-            )
-
-        source_url = self._get_field(project, "source_url")
-        if not source_url:
-            Logger.warning("Google Sheet update skipped: no source_url")
-            return
-
         from publisher.GoogleSheetUpdater import GoogleSheetUpdater
 
         updater = GoogleSheetUpdater()
-        success, error_message = updater.update(
-            source_url=source_url,
-            workspace_id=workspace_id,
-            project=project,
-        )
-        if success:
-            Storage.update_record(drpid, {"status": "updated_inventory"})
-        elif error_message:
-            msg_lower = error_message.lower()
-            if "not installed" in msg_lower:
-                record_crash(
-                    "Google Sheet update configured but Google Sheets API libraries are not installed. "
-                    "Install with: pip install google-api-python-client google-auth google-auth-httplib2 "
-                    "or leave google_sheet_id/google_credentials unset to skip sheet update."
-                )
-            Logger.warning(f"Google Sheet update failed: {error_message}")
-            Storage.append_to_field(
-                drpid, "warnings", f"Google Sheet update failed: {error_message}"
+
+        def _do_update() -> tuple[bool, Optional[str]]:
+            return updater.update(
+                source_url=get_field(project, "source_url"),
+                workspace_id=workspace_id,
+                project=project,
             )
+
+        self._update_sheet_if_configured(drpid, project, _do_update, "updated_inventory")
 
     def _project_url(self, workspace_id: str) -> str:
         """Build URL for a DataLumos project page."""

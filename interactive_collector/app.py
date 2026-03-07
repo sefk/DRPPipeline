@@ -220,30 +220,13 @@ def _folder_path_for_drpid(display_drpid: Optional[str]) -> Optional[str]:
         return None
 
 
-def _folder_extensions_and_size(folder_path: Path) -> tuple[List[str], int]:
-    """Return (sorted list of unique extensions without leading dot, total size in bytes)."""
-    exts: set[str] = set()
-    total = 0
-    try:
-        for p in folder_path.iterdir():
-            if p.is_file():
-                total += p.stat().st_size
-                if p.suffix:
-                    exts.add(p.suffix.lstrip(".").lower())
-    except OSError:
-        pass
-    return (sorted(exts), total)
+from utils.file_utils import folder_extensions_and_size, format_file_size
+from interactive_collector.pdf_utils import page_title_or_h1, unique_pdf_basename
 
-
-def _format_file_size(size_bytes: int) -> str:
-    """Format byte count as human-friendly string (e.g. '1.2 MB')."""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    if size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    if size_bytes < 1024 * 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
-    return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+# Re-export for tests that import from app
+_folder_extensions_and_size = folder_extensions_and_size
+_format_file_size = format_file_size
+_unique_pdf_basename = unique_pdf_basename
 
 
 _INDEX_HTML = """<!DOCTYPE html>
@@ -1555,36 +1538,6 @@ def spa_assets(subpath: str) -> Any:
     return _serve_spa(subpath)
 
 
-def _page_title_or_h1(page: Any) -> str:
-    """Get page <title> or first <h1> text from a Playwright page; empty string if neither."""
-    try:
-        title = page.title()
-        if title and (title or "").strip():
-            return (title or "").strip()
-        try:
-            h1 = page.locator("h1").first.text_content(timeout=2000)
-            if h1 and (h1 or "").strip():
-                return (h1 or "").strip()
-        except Exception:
-            pass
-    except Exception:
-        pass
-    return ""
-
-
-def _unique_pdf_basename(base: str, used: Dict[str, int]) -> str:
-    """Return a unique sanitized basename: base.pdf or base_1.pdf, base_2.pdf, etc."""
-    safe = sanitize_filename(base, max_length=80)
-    if not safe:
-        safe = "page"
-    key = safe.lower()
-    n = used.get(key, 0)
-    used[key] = n + 1
-    if n == 0:
-        return f"{safe}.pdf"
-    return f"{safe}_{n}.pdf"
-
-
 def _generate_save_progress(
     folder_path: Path,
     urls: List[str],
@@ -1752,9 +1705,9 @@ def _save_metadata_from_request() -> None:
         values["folder_path"] = folder_path_str
         folder_path = Path(folder_path_str)
         if folder_path.is_dir():
-            exts_list, total_bytes = _folder_extensions_and_size(folder_path)
+            exts_list, total_bytes = folder_extensions_and_size(folder_path)
             values["extensions"] = ", ".join(exts_list) if exts_list else ""
-            values["file_size"] = _format_file_size(total_bytes)
+            values["file_size"] = format_file_size(total_bytes)
         else:
             values["extensions"] = ""
             values["file_size"] = ""
@@ -1763,8 +1716,8 @@ def _save_metadata_from_request() -> None:
         values["file_size"] = ""
     try:
         Storage.update_record(drpid, values)
-    except ValueError:
-        pass
+    except ValueError as e:
+        Logger.warning(f"_save_metadata_from_request: record not found or invalid for DRPID={drpid}: {e}")
 
 
 @app.route("/save", methods=["POST"])

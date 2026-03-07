@@ -111,6 +111,29 @@ def format_file_size(size_bytes: int) -> str:
     return f"{size_bytes} B"
 
 
+def folder_extensions_and_size(folder_path: Path) -> tuple[list[str], int]:
+    """
+    Return (sorted list of unique extensions without leading dot, total size in bytes).
+
+    Args:
+        folder_path: Path to folder to scan
+
+    Returns:
+        Tuple of (extensions list, total bytes). Extensions are lowercased, no leading dot.
+    """
+    exts: set[str] = set()
+    total = 0
+    try:
+        for p in folder_path.iterdir():
+            if p.is_file():
+                total += p.stat().st_size
+                if p.suffix:
+                    exts.add(p.suffix.lstrip(".").lower())
+    except OSError:
+        pass
+    return (sorted(exts), total)
+
+
 def create_output_folder(base_dir: Path, drpid: int) -> Optional[Path]:
     """
     Create output folder for a DRPID.

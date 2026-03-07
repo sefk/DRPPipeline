@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from storage import Storage
 from upload.DataLumosBrowserSession import DataLumosBrowserSession
 from utils.Args import Args
+from utils.project_utils import get_field
 from utils.Errors import record_error
 from utils.Logger import Logger
 
@@ -57,7 +58,7 @@ class DataLumosUploader:
                 record_error(drpid, error)
             return
 
-        source_url = self._get_field(project, "source_url")
+        source_url = get_field(project, "source_url")
         if source_url:
             page = self._session.ensure_browser()
             from upload.GWDANominator import GWDANominator
@@ -83,12 +84,12 @@ class DataLumosUploader:
     def _validate_project(self, project: Dict[str, Any]) -> list[str]:
         """Validate required fields. Returns list of error messages."""
         errors: list[str] = []
-        if not self._get_field(project, "title"):
+        if not get_field(project, "title"):
             errors.append("Missing required field: title")
-        if not self._get_field(project, "summary"):
+        if not get_field(project, "summary"):
             errors.append("Missing required field: summary")
         
-        folder = self._get_field(project, "folder_path")
+        folder = get_field(project, "folder_path")
         if folder:
             path = Path(folder)
             if not path.exists():
@@ -97,10 +98,6 @@ class DataLumosUploader:
                 errors.append(f"Folder path is not a directory: {folder}")
         
         return errors
-    
-    def _get_field(self, project: Dict[str, Any], key: str) -> str:
-        """Get and trim a project field. Returns empty string if missing."""
-        return (project.get(key) or "").strip()
     
     def _project_url(self, workspace_id: str) -> str:
         """Build URL for a DataLumos project page."""
@@ -134,7 +131,7 @@ class DataLumosUploader:
         form_filler.wait_for_obscuring_elements()
         new_project_btn.click()
 
-        form_filler.fill_title(self._get_field(project, "title"))
+        form_filler.fill_title(get_field(project, "title"))
 
         wait_for_human_verification(page, timeout=60000)
 
@@ -147,36 +144,36 @@ class DataLumosUploader:
 
         form_filler.expand_all_sections()
         
-        agencies = [f for f in [self._get_field(project, "agency"), self._get_field(project, "office")] if f]
+        agencies = [f for f in [get_field(project, "agency"), get_field(project, "office")] if f]
         if agencies:
             form_filler.fill_agency(agencies)
         
-        form_filler.fill_summary(self._get_field(project, "summary"))
-        form_filler.fill_original_url(self._get_field(project, "source_url"))
-        
-        keywords_raw = self._get_field(project, "keywords")
+        form_filler.fill_summary(get_field(project, "summary"))
+        form_filler.fill_original_url(get_field(project, "source_url"))
+
+        keywords_raw = get_field(project, "keywords")
         if keywords_raw:
             form_filler.fill_keywords(self._parse_keywords(keywords_raw))
         
-        geographic = self._get_field(project, "geographic_coverage")
+        geographic = get_field(project, "geographic_coverage")
         if geographic:
             form_filler.fill_geographic_coverage(geographic)
         
-        time_start = self._get_field(project, "time_start")
-        time_end = self._get_field(project, "time_end")
+        time_start = get_field(project, "time_start")
+        time_end = get_field(project, "time_end")
         if time_start or time_end:
             form_filler.fill_time_period(time_start or None, time_end or None)
         
-        data_types = self._get_field(project, "data_types")
+        data_types = get_field(project, "data_types")
         if data_types:
             form_filler.fill_data_types(data_types)
         
-        notes = self._get_field(project, "collection_notes")
-        download_date = self._get_field(project, "download_date")
+        notes = get_field(project, "collection_notes")
+        download_date = get_field(project, "download_date")
         if notes or download_date:
             form_filler.fill_collection_notes(notes, download_date or None)
         
-        folder_path = self._get_field(project, "folder_path")
+        folder_path = get_field(project, "folder_path")
         if folder_path:
             from upload.DataLumosFileUploader import DataLumosFileUploader
             file_uploader = DataLumosFileUploader(page, timeout=Args.upload_timeout)
