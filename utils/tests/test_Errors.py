@@ -33,7 +33,7 @@ class TestRecordError(unittest.TestCase):
         record_error(123, "boom", update_storage=True)
 
         _mock_logger.error.assert_called_once_with("boom")
-        _mock_storage.update_record.assert_called_once_with(123, {"status": "Error"})
+        _mock_storage.update_record.assert_called_once_with(123, {"status": "error"})
         _mock_storage.append_to_field.assert_called_once_with(123, "errors", "boom")
 
     @patch("utils.Errors.Logger")
@@ -50,9 +50,9 @@ class TestRecordError(unittest.TestCase):
     @patch("utils.Errors.Storage", new_callable=Mock)
     def test_record_error_custom_status(self, mock_storage: Mock, mock_logger: Mock) -> None:
         """record_error uses status_value when provided."""
-        record_error(99, "bad", update_storage=True, status_value="Failed")
+        record_error(99, "bad", update_storage=True, status_value="failed")
 
-        mock_storage.update_record.assert_called_once_with(99, {"status": "Failed"})
+        mock_storage.update_record.assert_called_once_with(99, {"status": "failed"})
 
 
 class TestRecordWarning(unittest.TestCase):

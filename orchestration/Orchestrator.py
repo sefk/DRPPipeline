@@ -29,23 +29,23 @@ MODULES: Dict[str, Dict[str, Any]] = {
         "class_name": "Sourcing",
     },
     "interactive_collector": {
-        "prereq": "sourcing",
+        "prereq": "sourced",
         "class_name": None,  # Handled directly: start Flask app with first eligible URL
     },
     "socrata_collector": {
-        "prereq": "sourcing",
+        "prereq": "sourced",
         "class_name": "SocrataCollector",  
     },
     "catalog_collector": {
-        "prereq": "sourcing",
+        "prereq": "sourced",
         "class_name": "CatalogDataCollector",  
     }
     ,"upload": {
-        "prereq": "collector",
+        "prereq": "collected",
         "class_name": "DataLumosUploader",
     },
     "publisher": {
-        "prereq": "upload",
+        "prereq": "uploaded",
         "class_name": "DataLumosPublisher",
     },
     "cleanup_inprogress": {
@@ -184,7 +184,7 @@ class Orchestrator:
             # Modules with prereq: call run(drpid) for each eligible project
             if module == "publisher":
                 # Publisher also processes not_found and no_links (sheet-only update)
-                projects_upload = Storage.list_eligible_projects("upload", num_rows, start_row, start_drpid)
+                projects_upload = Storage.list_eligible_projects("uploaded", num_rows, start_row, start_drpid)
                 projects_not_found = Storage.list_eligible_projects("not_found", num_rows, start_row, start_drpid)
                 projects_no_links = Storage.list_eligible_projects("no_links", num_rows, start_row, start_drpid)
                 seen: set[int] = set()

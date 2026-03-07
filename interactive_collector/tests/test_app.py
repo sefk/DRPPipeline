@@ -299,7 +299,7 @@ class TestAppRoutes(unittest.TestCase):
     ) -> None:
         """GET /?next=1&current_drpid=1 redirects to URL and drpid of next eligible project."""
         next_project = {"DRPID": 5, "source_url": "https://example.com/next"}
-        # First call: _ensure_storage (None, 0); second: _get_next_eligible_after ("sourcing", 200)
+        # First call: _ensure_storage (None, 0); second: _get_next_eligible_after ("sourced", 200)
         mock_storage_cls.list_eligible_projects.side_effect = [
             [],
             [
@@ -642,7 +642,7 @@ class TestAppRoutes(unittest.TestCase):
         call_args = mock_storage_cls.update_record.call_args[0]
         self.assertEqual(call_args[0], 1)
         values = call_args[1]
-        self.assertEqual(values.get("status"), "collector")
+        self.assertEqual(values.get("status"), "collected")
         self.assertIsNone(values.get("errors"))
         self.assertEqual(values.get("title"), "Test Title")
         self.assertEqual(values.get("agency"), "Test Agency")

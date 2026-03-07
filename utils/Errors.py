@@ -36,7 +36,7 @@ def record_error(
     error_msg: str,
     *,
     update_storage: bool = True,
-    status_value: str = "Error",
+    status_value: str = "error",
 ) -> None:
     """
     Record an error for the current project: abort this project, continue with the next.

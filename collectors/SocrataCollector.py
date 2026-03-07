@@ -293,8 +293,8 @@ class SocrataCollector:
         Transfer result dict to Storage.
 
         Only keys that are Storage column names and have non-None values are
-        written. Sets status: "Error" if already recorded; else keeps result status
-        (e.g. "collector - file pending" when download skipped); else "collector" if
+        written. Sets status: "error" if already recorded; else keeps result status
+        (e.g. "collected - file pending" when download skipped); else "collected" if
         we have folder_path.
 
         Args:
@@ -302,10 +302,10 @@ class SocrataCollector:
             result: Flat result dict from collect() (Storage field names).
         """
         current = Storage.get(drpid)
-        if current and current.get("status") == "Error":
-            result = {**result, "status": "Error"}
+        if current and current.get("status") == "error":
+            result = {**result, "status": "error"}
         elif not result.get("status") and result.get("folder_path"):
-            result = {**result, "status": "collector"}
+            result = {**result, "status": "collected"}
 
         update_fields = {
             k: v for k, v in result.items()

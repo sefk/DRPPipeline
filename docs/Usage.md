@@ -52,7 +52,7 @@ Requires `google_sheet_id` in config (the sheet ID from the Google Sheet URL). U
 
 ### `collector`
 
-Processes projects with `status="sourcing"` and no errors: collects data and metadata (e.g. Socrata), then updates status.
+Processes projects with `status="sourced"` and no errors: collects data and metadata (e.g. Socrata), then updates status.
 
 ```bash
 python main.py collector
@@ -61,13 +61,13 @@ python main.py collector --num-rows 20 --max-workers 2
 
 **Process:**
 
-1. Finds eligible projects (`status="sourcing"`, no errors)
+1. Finds eligible projects (`status="sourced"`, no errors)
 2. For each project, collects data and metadata
 3. Updates project status on success; appends warnings/errors as needed
 
 ### `upload`
 
-Processes projects with `status="collector"` and no errors. Uploads collected data and metadata to DataLumos via browser automation.
+Processes projects with `status="collected"` and no errors. Uploads collected data and metadata to DataLumos via browser automation.
 
 ```bash
 python main.py upload
@@ -78,7 +78,7 @@ Requires `datalumos_username` and `datalumos_password` in config. Uses `upload_h
 
 ### `publisher`
 
-Processes projects with `status="upload"` and a valid `datalumos_id`. Runs the DataLumos publish workflow and sets `published_url` and `status="publisher"`. Optionally updates a Google Sheet (inventory) when `google_sheet_id` and `google_credentials` are set.
+Processes projects with `status="uploaded"` and a valid `datalumos_id`. Runs the DataLumos publish workflow and sets `published_url` and `status="published"`. Optionally updates a Google Sheet (inventory) when `google_sheet_id` and `google_credentials` are set.
 
 ```bash
 python main.py publisher
@@ -101,7 +101,7 @@ The pipeline uses SQLite (default: `drp_pipeline.db` in the current directory). 
 
 - **DRPID** — Unique project identifier
 - **source_url** — Source URL for the project
-- **status** — Last successfully completed module (e.g. `sourcing`, `collector`, `upload`, `publisher`)
+- **status** — Past-tense workflow state (e.g. `sourced`, `collected`, `uploaded`, `published`)
 - **warnings** — Newline-separated warning messages
 - **errors** — Newline-separated error messages (projects with errors are skipped for later modules)
 
@@ -109,7 +109,7 @@ The pipeline uses SQLite (default: `drp_pipeline.db` in the current directory). 
 
 A project is eligible for a module if:
 
-- `status` equals that module’s prerequisite (e.g. `status="sourcing"` for collector)
+- `status` equals that module’s prerequisite (e.g. `status="sourced"` for collector)
 - `errors` is empty or null (warnings do not disqualify)
 
 ## Batch size and concurrency

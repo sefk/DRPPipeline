@@ -13,7 +13,7 @@ Example usage:
     # Use storage methods directly on the class
     drpid = Storage.create_record("https://example.com")
     record = Storage.get(drpid)
-    Storage.update_record(drpid, {"title": "My Project", "status": "active"})
+    Storage.update_record(drpid, {"title": "My Project", "status": "sourced"})
     Storage.delete(drpid)
     
     # For testing: reset singleton

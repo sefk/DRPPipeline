@@ -40,7 +40,7 @@ def get_first_eligible() -> Optional[Dict[str, Any]]:
     """
     _ensure_storage()
     from storage import Storage
-    projects = Storage.list_eligible_projects("sourcing", 1)
+    projects = Storage.list_eligible_projects("sourced", 1)
     return projects[0] if projects else None
 
 
@@ -56,7 +56,7 @@ def get_next_eligible_after(current_drpid: int) -> Optional[Dict[str, Any]]:
     """
     _ensure_storage()
     from storage import Storage
-    projects = Storage.list_eligible_projects("sourcing", 200)
+    projects = Storage.list_eligible_projects("sourced", 200)
     for proj in projects:
         if proj["DRPID"] > current_drpid:
             return proj

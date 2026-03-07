@@ -205,13 +205,13 @@ class TestStorageSQLLite(unittest.TestCase):
         # Update with multiple fields
         self.storage.update_record(drpid, {
             "title": "My Project",
-            "status": "active",
+            "status": "sourced",
             "folder_path": "C:\\data\\project1"
         })
         
         record = self.storage.get(drpid)
         self.assertEqual(record["title"], "My Project")
-        self.assertEqual(record["status"], "active")
+        self.assertEqual(record["status"], "sourced")
         self.assertEqual(record["folder_path"], "C:\\data\\project1")
     
     def test_update_record_partial(self) -> None:
@@ -221,14 +221,14 @@ class TestStorageSQLLite(unittest.TestCase):
         drpid = self.storage.create_record("https://example.com")
         
         # Set initial values
-        self.storage.update_record(drpid, {"title": "Initial Title", "status": "pending"})
+        self.storage.update_record(drpid, {"title": "Initial Title", "status": "collected"})
         
         # Update only one field
-        self.storage.update_record(drpid, {"status": "completed"})
+        self.storage.update_record(drpid, {"status": "published"})
         
         record = self.storage.get(drpid)
         self.assertEqual(record["title"], "Initial Title")  # Should remain
-        self.assertEqual(record["status"], "completed")  # Should be updated
+        self.assertEqual(record["status"], "published")  # Should be updated
     
     def test_update_record_not_exist(self) -> None:
         """Test updating non-existent record raises ValueError."""
@@ -491,12 +491,12 @@ class TestStorageSQLLite(unittest.TestCase):
         """Test list_eligible_projects returns only status=X and (errors null or '')."""
         self.storage.initialize(db_path=self.test_db_path)
         self.storage.create_record("https://a.com")
-        self.storage.update_record(1, {"status": "sourcing"})
+        self.storage.update_record(1, {"status": "sourced"})
         self.storage.create_record("https://b.com")
-        self.storage.update_record(2, {"status": "sourcing", "errors": "fail"})
+        self.storage.update_record(2, {"status": "sourced", "errors": "fail"})
         self.storage.create_record("https://c.com")
-        self.storage.update_record(3, {"status": "sourcing"})
-        out = self.storage.list_eligible_projects("sourcing", None)
+        self.storage.update_record(3, {"status": "sourced"})
+        out = self.storage.list_eligible_projects("sourced", None)
         self.assertEqual(len(out), 2)
         drpids = [r["DRPID"] for r in out]
         self.assertIn(1, drpids)
@@ -508,8 +508,8 @@ class TestStorageSQLLite(unittest.TestCase):
         self.storage.initialize(db_path=self.test_db_path)
         for i in range(5):
             self.storage.create_record(f"https://x{i}.com")
-            self.storage.update_record(i + 1, {"status": "sourcing"})
-        out = self.storage.list_eligible_projects("sourcing", 2)
+            self.storage.update_record(i + 1, {"status": "sourced"})
+        out = self.storage.list_eligible_projects("sourced", 2)
         self.assertEqual(len(out), 2)
         self.assertEqual(out[0]["DRPID"], 1)
         self.assertEqual(out[1]["DRPID"], 2)
@@ -519,8 +519,8 @@ class TestStorageSQLLite(unittest.TestCase):
         self.storage.initialize(db_path=self.test_db_path)
         for i in range(5):
             self.storage.create_record(f"https://example.com/{i}")
-            self.storage.update_record(i + 1, {"status": "sourcing"})
-        out = self.storage.list_eligible_projects("sourcing", None, start_row=3)
+            self.storage.update_record(i + 1, {"status": "sourced"})
+        out = self.storage.list_eligible_projects("sourced", None, start_row=3)
         self.assertEqual(len(out), 3)
         self.assertEqual([r["DRPID"] for r in out], [3, 4, 5])
 
@@ -529,21 +529,21 @@ class TestStorageSQLLite(unittest.TestCase):
         self.storage.initialize(db_path=self.test_db_path)
         for i in range(5):
             self.storage.create_record(f"https://example.com/{i}")
-        self.storage.update_record(1, {"status": "sourcing"})
-        self.storage.update_record(3, {"status": "sourcing"})
-        self.storage.update_record(5, {"status": "sourcing"})
+        self.storage.update_record(1, {"status": "sourced"})
+        self.storage.update_record(3, {"status": "sourced"})
+        self.storage.update_record(5, {"status": "sourced"})
         # Rows 2,4 have other status. Full table: 1,2,3,4,5. start_row=4 -> DRPID>=4
-        out = self.storage.list_eligible_projects("sourcing", None, start_row=4)
+        out = self.storage.list_eligible_projects("sourced", None, start_row=4)
         self.assertEqual([r["DRPID"] for r in out], [5])
 
     def test_list_eligible_projects_order_by_drpid(self) -> None:
         """Test list_eligible_projects returns rows ordered by DRPID ASC."""
         self.storage.initialize(db_path=self.test_db_path)
         self.storage.create_record("https://a.com")
-        self.storage.update_record(1, {"status": "sourcing"})
+        self.storage.update_record(1, {"status": "sourced"})
         self.storage.create_record("https://b.com")
-        self.storage.update_record(2, {"status": "sourcing"})
-        out = self.storage.list_eligible_projects("sourcing", None)
+        self.storage.update_record(2, {"status": "sourced"})
+        out = self.storage.list_eligible_projects("sourced", None)
         self.assertEqual([r["DRPID"] for r in out], [1, 2])
 
     def test_list_eligible_projects_respects_min_drpid(self) -> None:
@@ -551,8 +551,8 @@ class TestStorageSQLLite(unittest.TestCase):
         self.storage.initialize(db_path=self.test_db_path)
         for i in range(5):
             self.storage.create_record(f"https://example.com/{i}")
-            self.storage.update_record(i + 1, {"status": "sourcing"})
-        out = self.storage.list_eligible_projects("sourcing", None, min_drpid=4)
+            self.storage.update_record(i + 1, {"status": "sourced"})
+        out = self.storage.list_eligible_projects("sourced", None, min_drpid=4)
         self.assertEqual([r["DRPID"] for r in out], [4, 5])
 
     def test_append_to_field_warnings(self) -> None:

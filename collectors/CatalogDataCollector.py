@@ -380,7 +380,7 @@ class CatalogDataCollector:
         """
         Transfer result dict to Storage (status_notes and optional status).
 
-        Does not set status to "collector" since we do not produce folder_path.
+        Does not set status to "collected" since we do not produce folder_path.
         """
         update_fields = {k: v for k, v in result.items() if v is not None}
         if update_fields:

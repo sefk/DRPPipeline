@@ -555,7 +555,7 @@ def skip_route() -> Any:
             time_end=metadata["time_end"],
             download_date=metadata["download_date"],
             status_notes=status_notes,
-            status_override=f"collector hold - {reason}",
+            status_override=f"collector_hold - {reason}",
         )
         return {"ok": True}
     except (ValueError, RuntimeError) as e:

@@ -20,11 +20,11 @@ class DataLumosUploader:
     """
     Upload module that uploads collected project data to DataLumos.
     
-    Implements ModuleProtocol. For each eligible project (status="collector"),
+    Implements ModuleProtocol. For each eligible project (status="collected"),
     this module: authenticates, creates project, fills form fields,
     and updates Storage with datalumos_id.
     
-    Prerequisites: status="collector" and no errors
+    Prerequisites: status="collected" and no errors
     Success status: status="upload"
     """
     
@@ -71,7 +71,7 @@ class DataLumosUploader:
             datalumos_id = self._upload_project(project, drpid)
             Storage.update_record(drpid, {
                 "datalumos_id": datalumos_id,
-                "status": "upload",
+                "status": "uploaded",
             })
             Logger.info(f"Upload completed for DRPID={drpid}, datalumos_id={datalumos_id}")
         except Exception as e:

@@ -25,14 +25,14 @@ class DataLumosPublisher:
     """
     Publisher module that publishes uploaded projects in DataLumos.
 
-    Implements ModuleProtocol. For each eligible project (status="upload"),
+    Implements ModuleProtocol. For each eligible project (status="uploaded"),
     this module: authenticates, navigates to the project, runs the publish
     workflow (Publish Project → review → Proceed to Publish → dialog →
     Publish Data → Back to Project), and updates Storage with published_url
-    and status="publisher".
+    and status="published".
 
     Prerequisites: status="upload" and no errors
-    Success status: status="publisher"; status="updated_inventory" after Google Sheet update (if configured).
+    Success status: status="published"; status="updated_inventory" after Google Sheet update (if configured).
     """
 
     WORKSPACE_URL = "https://www.datalumos.org/datalumos/workspace"
@@ -89,7 +89,7 @@ class DataLumosPublisher:
             published_url = PUBLISHED_URL_TEMPLATE.format(workspace_id=workspace_id)
             Storage.update_record(drpid, {
                 "published_url": published_url,
-                "status": "publisher",
+                "status": "published",
             })
             Logger.info(f"Publish completed for DRPID={drpid}, published_url={published_url}")
 

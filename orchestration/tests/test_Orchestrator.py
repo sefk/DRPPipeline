@@ -128,7 +128,7 @@ class TestOrchestrator(unittest.TestCase):
             Orchestrator.run("catalog_collector")
 
         mock_storage_cls.initialize.assert_called_once()
-        mock_storage.list_eligible_projects.assert_called_once_with("sourcing", None, None, None)
+        mock_storage.list_eligible_projects.assert_called_once_with("sourced", None, None, None)
         mock_find_class.assert_called_once_with("CatalogDataCollector")
         mock_collector_cls.assert_called_once()
         mock_collector_instance.run.assert_called_once_with(1)

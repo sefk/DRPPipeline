@@ -344,7 +344,7 @@ class TestCatalogDataCollector(unittest.TestCase):
         mock_storage.get.return_value = {
             "DRPID": 123,
             "source_url": "https://catalog.data.gov/dataset/test",
-            "status": "sourcing",
+            "status": "sourced",
         }
         mock_collect.return_value = {
             "status_notes": "\n  CSV File -> csv https://example.com/a.csv\n  JSON File -> json https://example.com/b.json",
@@ -385,7 +385,7 @@ class TestCatalogDataCollector(unittest.TestCase):
         self, mock_storage: Mock, mock_record_error: Mock
     ) -> None:
         """Test run() when source_url is missing."""
-        mock_storage.get.return_value = {"DRPID": 123, "status": "sourcing"}
+        mock_storage.get.return_value = {"DRPID": 123, "status": "sourced"}
 
         self.collector.run(123)
 

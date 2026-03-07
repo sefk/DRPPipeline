@@ -32,7 +32,7 @@ class ModuleProtocol(Protocol):
             
         The module should:
         - Get project data from Storage if needed: Storage.get(drpid)
-        - Update status on success: Storage.update_record(drpid, {"status": "module_name"})
+        - Update status on success: Storage.update_record(drpid, {"status": "module_past_tense"})  # e.g. "sourced", "collected"
         - Append warnings/errors: Storage.append_to_field(drpid, "warnings"/"errors", text)
         - Get num_rows from Args if needed: Args.num_rows
         """

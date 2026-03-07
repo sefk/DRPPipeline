@@ -147,7 +147,7 @@ def _get_first_eligible(flask_app: Flask) -> Optional[Dict[str, Any]]:
     """Return the first eligible project (prereq=sourcing, no errors) or None."""
     _ensure_storage(flask_app)
     from storage import Storage
-    projects = Storage.list_eligible_projects("sourcing", 1)
+    projects = Storage.list_eligible_projects("sourced", 1)
     return projects[0] if projects else None
 
 
@@ -156,7 +156,7 @@ def _get_next_eligible_after(flask_app: Flask, current_drpid: int) -> Optional[D
     _ensure_storage(flask_app)
     from storage import Storage
     # Fetch a chunk and find first with DRPID > current_drpid
-    projects = Storage.list_eligible_projects("sourcing", 200)
+    projects = Storage.list_eligible_projects("sourced", 200)
     for proj in projects:
         if proj["DRPID"] > current_drpid:
             return proj
@@ -1737,7 +1737,7 @@ def _save_metadata_from_request() -> None:
     _ensure_storage(app)
     from storage import Storage
     values: Dict[str, Any] = {
-        "status": "collector",
+        "status": "collected",
         "errors": None,
         "title": (request.form.get("metadata_title") or "").strip(),
         "agency": (request.form.get("metadata_agency") or "").strip(),

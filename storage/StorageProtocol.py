@@ -116,7 +116,7 @@ class StorageProtocol(Protocol):
         min_drpid (DRPID >= min_drpid) when min_drpid is set.
 
         Args:
-            prereq_status: Required status (e.g. "sourcing" for collectors). None -> [].
+            prereq_status: Required status (e.g. "sourced" for collectors). None -> [].
             limit: Max rows to return. None = no limit.
             start_row: If set, skip first (start_row - 1) rows of the full table (1-origin).
             min_drpid: If set, only return projects with DRPID >= this value (takes precedence over start_row when both set).

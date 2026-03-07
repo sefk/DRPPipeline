@@ -4,7 +4,7 @@ Sourcing module for DRP Pipeline.
 Obtains candidate source URLs from configured sources (e.g. DRP Data_Inventories
 spreadsheet), performs duplicate and availability checks, and creates storage
 records. Duplicate-in-storage is not created; an Error is logged. Other outcomes
-create a row with status: dupe_in_DL, not_found (URL 404 or equivalent), sourcing (good), or Error.
+create a row with status: dupe_in_DL, not_found (URL 404 or equivalent), sourced (good), or error.
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -48,7 +48,7 @@ class Sourcing:
         """
         Process configured sources: obtain candidate URLs, create storage records.
         Duplicate URL already in storage: no row created, Error logged. Other
-        outcomes create a row with status: dupe_in_DL, not_found (404 or equivalent), sourcing (good), or Error.
+        outcomes create a row with status: dupe_in_DL, not_found (404 or equivalent), sourced (good), or error.
 
         Args:
             drpid: DRPID of project to process. Use -1 for sourcing (no specific project).
@@ -122,7 +122,7 @@ class Sourcing:
                 error_count += 1
                 Storage.update_record(
                     new_drpid,
-                    {"status": "Error", "office": office, "agency": agency, "errors": str(exc)},
+                    {"status": "error", "office": office, "agency": agency, "errors": str(exc)},
                 )
             elif status_code == 404:
                 not_found_count += 1
@@ -134,7 +134,7 @@ class Sourcing:
                 successfully_added += 1
                 Storage.update_record(
                     new_drpid,
-                    {"status": "sourcing", "office": office, "agency": agency},
+                    {"status": "sourced", "office": office, "agency": agency},
                 )
 
         id_range_str = ""

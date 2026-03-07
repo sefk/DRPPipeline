@@ -1,5 +1,5 @@
 /**
- * SkipModal - Asks for a reason, then saves project with status "collector hold - {reason}".
+ * SkipModal - Asks for a reason, then saves project with status "collector_hold - {reason}".
  */
 import { useState } from "react";
 import { useCollectorStore } from "../store";

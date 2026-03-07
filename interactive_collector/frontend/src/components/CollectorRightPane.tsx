@@ -188,7 +188,7 @@ export function CollectorRightPane({ onShowLog }: CollectorRightPaneProps) {
             <button
               type="button"
               className="btn-top"
-              title="Skip project with reason (sets status to collector hold)"
+              title="Skip project with reason (sets status to collector_hold)"
               onClick={openSkipModal}
               disabled={loading}
             >

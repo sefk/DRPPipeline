@@ -192,7 +192,7 @@ class TestSocrataCollector(unittest.TestCase):
     @patch("collectors.SocrataCollector.Storage")
     def test_run_missing_source_url(self, mock_storage: Mock, mock_record_error: Mock) -> None:
         """Test run() when project record has no source_url: record_error(update_storage=True)."""
-        mock_storage.get.return_value = {"DRPID": 123, "status": "sourcing"}
+        mock_storage.get.return_value = {"DRPID": 123, "status": "sourced"}
 
         self.collector.run(123)
 
@@ -210,7 +210,7 @@ class TestSocrataCollector(unittest.TestCase):
         mock_storage.get.return_value = {
             "DRPID": 123,
             "source_url": "https://data.cdc.gov/view/test",
-            "status": "sourcing",
+            "status": "sourced",
         }
 
         folder_path = self.temp_dir / "DRP000123"
@@ -235,7 +235,7 @@ class TestSocrataCollector(unittest.TestCase):
         self.assertEqual(call_args[0][0], 123)
         update_fields = call_args[0][1]
 
-        self.assertEqual(update_fields["status"], "collector")
+        self.assertEqual(update_fields["status"], "collected")
         self.assertEqual(update_fields["title"], "Test Dataset")
         self.assertEqual(update_fields["summary"], "<p>Test description</p>")
         self.assertEqual(update_fields["keywords"], "health, data, test")
@@ -253,7 +253,7 @@ class TestSocrataCollector(unittest.TestCase):
         mock_storage.get.return_value = {
             "DRPID": 123,
             "source_url": "https://data.cdc.gov/view/test",
-            "status": "sourcing",
+            "status": "sourced",
         }
 
         mock_collect.return_value = {"collection_notes": "Invalid URL"}
@@ -274,7 +274,7 @@ class TestSocrataCollector(unittest.TestCase):
         mock_storage.get.return_value = {
             "DRPID": 123,
             "source_url": "https://data.cdc.gov/view/test",
-            "status": "sourcing",
+            "status": "sourced",
         }
 
         folder_path = self.temp_dir / "DRP000123"
@@ -290,7 +290,7 @@ class TestSocrataCollector(unittest.TestCase):
 
         update_call = mock_storage.update_record.call_args
         self.assertIsNotNone(update_call)
-        self.assertEqual(update_call[0][1].get("status"), "collector")
+        self.assertEqual(update_call[0][1].get("status"), "collected")
     
     @patch("collectors.SocrataCollector.record_error")
     @patch("collectors.SocrataCollector.Storage")
@@ -300,7 +300,7 @@ class TestSocrataCollector(unittest.TestCase):
         mock_storage.get.return_value = {
             "DRPID": 123,
             "source_url": "https://data.cdc.gov/view/test",
-            "status": "sourcing",
+            "status": "sourced",
         }
 
         mock_collect.side_effect = Exception("Collection failed")
@@ -319,7 +319,7 @@ class TestSocrataCollector(unittest.TestCase):
         mock_storage.get.return_value = {
             "DRPID": 123,
             "source_url": "https://data.cdc.gov/view/test",
-            "status": "sourcing",
+            "status": "sourced",
         }
 
         folder_path = self.temp_dir / "DRP000123"
@@ -335,7 +335,7 @@ class TestSocrataCollector(unittest.TestCase):
         update_call = mock_storage.update_record.call_args
         self.assertIsNotNone(update_call)
         update_fields = update_call[0][1]
-        self.assertEqual(update_fields["status"], "collector")
+        self.assertEqual(update_fields["status"], "collected")
         self.assertNotIn("download_date", update_fields)
 
     # record_error() is in utils.Errors and tested in utils.test_Errors.

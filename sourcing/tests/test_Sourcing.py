@@ -65,16 +65,16 @@ class TestSourcing(unittest.TestCase):
 
     @patch("utils.url_utils.fetch_page_body", return_value=(200, "", "text/html", False))
     @patch.object(Sourcing, "get_candidate_urls")
-    def test_run_creates_row_status_sourcing(self, mock_get: object, _mock_fetch: object) -> None:
-        """Test run creates record and sets status 'sourcing' when URL is good."""
+    def test_run_creates_row_status_sourced(self, mock_get: object, _mock_fetch: object) -> None:
+        """Test run creates record and sets status 'sourced' when URL is good."""
         mock_get.return_value = (
             [{"url": "https://example.com/good", "office": "O", "agency": "A"}],
             0,
         )
         self.sourcing.run(-1)
-        projects = self.storage.list_eligible_projects("sourcing", None)
+        projects = self.storage.list_eligible_projects("sourced", None)
         self.assertEqual(len(projects), 1)
-        self.assertEqual(projects[0]["status"], "sourcing")
+        self.assertEqual(projects[0]["status"], "sourced")
         self.assertEqual(projects[0]["source_url"], "https://example.com/good")
 
     @patch("utils.url_utils.fetch_page_body", return_value=(404, "", None, False))
@@ -123,7 +123,7 @@ class TestSourcing(unittest.TestCase):
         self.sourcing.run(-1)
         record = self.storage.get(1)
         self.assertIsNotNone(record)
-        self.assertEqual(record["status"], "Error")
+        self.assertEqual(record["status"], "error")
         self.assertIn("network error", record.get("errors", ""))
 
 

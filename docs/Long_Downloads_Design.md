@@ -32,7 +32,7 @@ Some datasets are 10GB+ and can take 20+ minutes to download. Blocking the pipel
 
 **Changes:**
 
-- **Collector:** Split into “quick phase” (PDF + metadata) and “download phase”. After the quick phase, push a download job (e.g. `(drpid, source_url, folder_path)`) onto a shared queue and write status like `"collector - file pending"`. Return so the Orchestrator can continue.
+- **Collector:** Split into “quick phase” (PDF + metadata) and “download phase”. After the quick phase, push a download job (e.g. `(drpid, source_url, folder_path)`) onto a shared queue and write status like `"collected - file pending"`. Return so the Orchestrator can continue.
 - **Download workers:** Dedicated thread(s) that loop: pop a job, open browser, load `source_url`, click Export → Download, save to `folder_path`, update Storage (file_size, download_date, status → `"collector"`), then close browser and repeat.
 - **Orchestrator:** After dispatching all projects, **join** the download workers (or wait until the queue is empty and workers idle) so the process doesn’t exit with pending downloads.
 - **Logger:** Thread-local drpid in workers (same as Option 1).
@@ -44,12 +44,12 @@ Some datasets are 10GB+ and can take 20+ minutes to download. Blocking the pipel
 
 ## Option 3: Two-phase run (batch “collect” then “download”)
 
-**Idea:** **Phase 1:** Run the collector with an option to **skip** the actual download for large (or all) datasets: do PDF + metadata, set status to `"collector - file pending"`. **Phase 2:** A separate run (or script) that only processes records with status `"collector - file pending"`, using a thread/process pool and long timeouts to perform only the download step (open page, Export, Download, save, update Storage).
+**Idea:** **Phase 1:** Run the collector with an option to **skip** the actual download for large (or all) datasets: do PDF + metadata, set status to `"collected - file pending"`. **Phase 2:** A separate run (or script) that only processes records with status `"collected - file pending"`, using a thread/process pool and long timeouts to perform only the download step (open page, Export, Download, save, update Storage).
 
 **Changes:**
 
-- **Collector:** Add a flag or heuristic (e.g. “large dataset” warning, or “always defer download”) to skip `SocrataDatasetDownloader.download()` and set status to `"collector - file pending"`.
-- **New “download” module or script:** List projects with status `"collector - file pending"`, then for each (or in parallel via pool) run the download-only flow (browser → Export → Download → save → update). Use a long timeout (e.g. 30 min) and optionally retries.
+- **Collector:** Add a flag or heuristic (e.g. “large dataset” warning, or “always defer download”) to skip `SocrataDatasetDownloader.download()` and set status to `"collected - file pending"`.
+- **New “download” module or script:** List projects with status `"collected - file pending"`, then for each (or in parallel via pool) run the download-only flow (browser → Export → Download → save → update). Use a long timeout (e.g. 30 min) and optionally retries.
 
 **Pros:** Fits cron/batch workflows; main pipeline stays fast; large downloads can be run in a separate, tuned environment.  
 **Cons:** Two passes; need a robust “download-only” path and possibly a way to get the exact download URL/session if the site requires it.
