@@ -179,3 +179,13 @@ To run only the interactive collector tests:
 ```bash
 python -m pytest interactive_collector/tests -v
 ```
+
+### Coverage
+
+To measure line coverage (requires `pytest-cov`):
+
+```bash
+python -m pytest --cov=. --cov-report=term-missing
+```
+
+This prints per-file coverage and highlights missing lines. Overall coverage is summarized at the end (e.g. ~77% for the full suite).

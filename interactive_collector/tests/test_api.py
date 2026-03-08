@@ -3,7 +3,9 @@ Unit tests for the Interactive Collector JSON API.
 """
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from interactive_collector.app import app
@@ -29,6 +31,21 @@ class TestApiProjects(unittest.TestCase):
         """GET /api/projects/next without current_drpid returns 400."""
         resp = self.client.get("/api/projects/next")
         self.assertEqual(resp.status_code, 400)
+
+    def test_projects_next_invalid_current_drpid_returns_400(self) -> None:
+        """GET /api/projects/next with non-integer current_drpid returns 400."""
+        resp = self.client.get("/api/projects/next?current_drpid=abc")
+        self.assertEqual(resp.status_code, 400)
+        data = json.loads(resp.data)
+        self.assertIn("error", data)
+
+    def test_projects_first_returns_project_when_found(self) -> None:
+        """GET /api/projects/first returns project when get_first_eligible returns one."""
+        proj = {"DRPID": 1, "source_url": "https://example.com"}
+        with patch("interactive_collector.api.get_first_eligible", return_value=proj):
+            resp = self.client.get("/api/projects/first")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(json.loads(resp.data), proj)
 
     def test_projects_get_returns_404_for_missing(self) -> None:
         """GET /api/projects/999 returns 404 when not found."""
@@ -77,6 +94,17 @@ class TestApiProjectsLoad(unittest.TestCase):
         self.assertIn("scoreboard", data)
         self.assertEqual(data["scoreboard"], [])
 
+    def test_projects_load_invalid_drpid_returns_400(self) -> None:
+        """POST /api/projects/load with invalid drpid returns 400."""
+        resp = self.client.post(
+            "/api/projects/load",
+            json={"drpid": "not-a-number"},
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = json.loads(resp.data)
+        self.assertIn("error", data)
+
 
 class TestApiMetadataFromPage(unittest.TestCase):
     """Tests for /api/metadata-from-page (Copy & Open page preload)."""
@@ -121,6 +149,15 @@ class TestApiProxy(unittest.TestCase):
         resp = self.client.get("/api/proxy?url=not-a-url")
         self.assertEqual(resp.status_code, 400)
 
+    def test_proxy_returns_502_on_request_error(self) -> None:
+        """GET /api/proxy returns 502 when requests.get raises."""
+        import requests as req
+        with patch("interactive_collector.api.requests.get", side_effect=req.RequestException("timeout")):
+            resp = self.client.get("/api/proxy?url=https://example.com/style.css")
+        self.assertEqual(resp.status_code, 502)
+        data = json.loads(resp.data)
+        self.assertIn("error", data)
+
 
 class TestApiScoreboard(unittest.TestCase):
     """Tests for /api/scoreboard."""
@@ -149,6 +186,102 @@ class TestApiScoreboard(unittest.TestCase):
         self.assertEqual(data["urls"], [])
         resp2 = self.client.get("/api/scoreboard")
         self.assertEqual(json.loads(resp2.data)["scoreboard"], [])
+
+    def test_scoreboard_add_requires_url(self) -> None:
+        """POST /api/scoreboard/add without url returns 400."""
+        resp = self.client.post("/api/scoreboard/add", json={}, content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_scoreboard_add_returns_tree_and_urls(self) -> None:
+        """POST /api/scoreboard/add with url adds and returns scoreboard."""
+        resp = self.client.post(
+            "/api/scoreboard/add",
+            json={"url": "https://example.com/page", "referrer": None, "status_label": "OK"},
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertIn("scoreboard", data)
+        self.assertIn("urls", data)
+        self.assertEqual(data["urls"], ["https://example.com/page"])
+
+
+class TestApiNoLinks(unittest.TestCase):
+    """Tests for /api/no-links."""
+
+    def setUp(self) -> None:
+        self.client = app.test_client()
+
+    def test_no_links_requires_drpid(self) -> None:
+        """POST /api/no-links without drpid returns 400."""
+        resp = self.client.post("/api/no-links", json={}, content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_no_links_success(self) -> None:
+        """POST /api/no-links with valid drpid updates storage and returns 200."""
+        with patch("storage.Storage") as mock_storage:
+            resp = self.client.post(
+                "/api/no-links",
+                json={"drpid": 1},
+                content_type="application/json",
+            )
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertEqual(data.get("ok"), True)
+
+
+class TestApiExtensionSavePdf(unittest.TestCase):
+    """Tests for /api/extension/save-pdf."""
+
+    def setUp(self) -> None:
+        self.client = app.test_client()
+
+    def test_extension_save_pdf_options_returns_204(self) -> None:
+        """OPTIONS /api/extension/save-pdf returns 204 with CORS headers."""
+        resp = self.client.open("/api/extension/save-pdf", method="OPTIONS")
+        self.assertEqual(resp.status_code, 204)
+        self.assertIn("Access-Control-Allow-Origin", resp.headers)
+
+    def test_extension_save_pdf_requires_drpid(self) -> None:
+        """POST without drpid returns 400."""
+        resp = self.client.post(
+            "/api/extension/save-pdf",
+            data={"url": "https://example.com/page"},
+            content_type="multipart/form-data",
+        )
+        self.assertIn(resp.status_code, (400, 500))
+        if resp.status_code == 400:
+            data = json.loads(resp.data)
+            self.assertIn("error", data)
+
+    def test_extension_save_pdf_requires_valid_url(self) -> None:
+        """POST with invalid url returns 400."""
+        resp = self.client.post(
+            "/api/extension/save-pdf",
+            data={"drpid": "1", "url": "not-a-url"},
+            content_type="multipart/form-data",
+        )
+        self.assertIn(resp.status_code, (400, 500))
+
+    def test_extension_save_pdf_success(self) -> None:
+        """POST with drpid, url, and pdf file writes file and returns 200."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("interactive_collector.api.get_result_by_drpid", return_value={1: {"folder_path": None}}):
+                with patch("interactive_collector.api.ensure_output_folder", return_value=tmpdir):
+                    with open(Path(__file__).parent / "test_api.py", "rb") as fake_pdf:
+                        resp = self.client.post(
+                            "/api/extension/save-pdf",
+                            data={
+                                "drpid": "1",
+                                "url": "https://example.com/page",
+                                "pdf": (fake_pdf, "page.pdf"),
+                            },
+                            content_type="multipart/form-data",
+                        )
+            self.assertEqual(resp.status_code, 200)
+            data = json.loads(resp.data)
+            self.assertEqual(data.get("ok"), True)
+            self.assertIn("filename", data)
 
 
 class TestDownloadsWatcher(unittest.TestCase):

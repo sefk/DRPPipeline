@@ -12,7 +12,13 @@ from utils.Args import Args
 from utils.Logger import Logger
 
 from collectors.SocrataCollector import SocrataCollector
-from collectors.SocrataDatasetDownloader import SocrataDatasetDownloader
+from collectors.SocrataDatasetDownloader import (
+    SocrataDatasetDownloader,
+    _build_socrata_export_url,
+    _extension_from_export_url,
+    _get_socrata_view_id_from_url,
+    _is_socrata_export_url,
+)
 from collectors.tests.test_utils import setup_mock_playwright
 
 
@@ -368,3 +374,105 @@ class TestSocrataDatasetDownloader(unittest.TestCase):
         
         self.assertFalse(result)
         mock_record_error.assert_called_once_with(1, "Timeout waiting for download")
+
+    def test_get_socrata_view_id_from_url_about_data(self) -> None:
+        """_get_socrata_view_id_from_url returns segment before about_data."""
+        self.assertEqual(
+            _get_socrata_view_id_from_url("https://data.cdc.gov/view/yctb-fv7w/about_data"),
+            "yctb-fv7w",
+        )
+        self.assertIsNone(_get_socrata_view_id_from_url("https://example.com/about_data"))
+
+    def test_get_socrata_view_id_from_url_last_segment(self) -> None:
+        """_get_socrata_view_id_from_url returns last segment when no about_data."""
+        self.assertEqual(
+            _get_socrata_view_id_from_url("https://data.cdc.gov/view/abc-123"),
+            "abc-123",
+        )
+
+    def test_get_socrata_view_id_from_url_empty_path(self) -> None:
+        """_get_socrata_view_id_from_url returns None for empty path."""
+        self.assertIsNone(_get_socrata_view_id_from_url("https://example.com/"))
+
+    def test_build_socrata_export_url(self) -> None:
+        """_build_socrata_export_url builds API export URL."""
+        url = _build_socrata_export_url("https://data.cdc.gov/view/yctb-fv7w", "yctb-fv7w")
+        self.assertIn("/api/v3/views/yctb-fv7w/export.csv", url)
+        self.assertIn("accessType=DOWNLOAD", url)
+
+    def test_is_socrata_export_url_true(self) -> None:
+        """_is_socrata_export_url returns True for Socrata export URLs."""
+        self.assertTrue(_is_socrata_export_url("https://data.cdc.gov/api/v3/views/abc/export.csv?x=1"))
+
+    def test_is_socrata_export_url_false(self) -> None:
+        """_is_socrata_export_url returns False for non-export URLs."""
+        self.assertFalse(_is_socrata_export_url("https://data.cdc.gov/view/abc"))
+
+    def test_extension_from_export_url_path(self) -> None:
+        """_extension_from_export_url returns extension from path."""
+        self.assertEqual(_extension_from_export_url("https://x/api/views/id/export.csv"), "csv")
+
+    def test_extension_from_export_url_query_format(self) -> None:
+        """_extension_from_export_url uses format query param when path has no extension."""
+        self.assertEqual(_extension_from_export_url("https://x/api/views/id?format=json"), "json")
+
+    def test_extension_from_export_url_default_csv(self) -> None:
+        """_extension_from_export_url defaults to csv."""
+        self.assertEqual(_extension_from_export_url("https://x/api/views/id"), "csv")
+
+    @patch("collectors.SocrataDatasetDownloader.download_via_url")
+    @patch("collectors.SocrataCollector.sync_playwright")
+    def test_download_via_constructed_url_success(
+        self, mock_playwright: Mock, mock_download: Mock
+    ) -> None:
+        """download() with use_url_download and view_id uses _download_via_constructed_url and succeeds."""
+        setup_mock_playwright(mock_playwright)
+        self.collector._init_browser()
+        self.collector._page.url = "https://data.cdc.gov/view/yctb-fv7w/about_data"
+        self.collector._page.title = Mock(return_value="My Dataset")
+        mock_download.return_value = (1000, True)
+        downloader = SocrataDatasetDownloader(self.collector)
+        (self.temp_dir / "existing.pdf").write_text("x")
+        (self.temp_dir / "My_Dataset.csv").write_text("a,b\n1,2")
+        with patch.object(Args, "use_url_download", True):
+            result = downloader.download(self.temp_dir, timeout=60000)
+        self.assertTrue(result)
+        mock_download.assert_called_once()
+        self.assertEqual(self.collector._result.get("extensions"), "pdf, csv")
+
+    @patch("collectors.SocrataDatasetDownloader.download_via_url")
+    @patch("collectors.SocrataCollector.sync_playwright")
+    def test_download_via_constructed_url_401_falls_back_to_dialog(
+        self, mock_playwright: Mock, mock_download: Mock
+    ) -> None:
+        """download() when direct URL returns 401 falls back to Export dialog."""
+        import requests
+        setup_mock_playwright(mock_playwright)
+        self.collector._init_browser()
+        self.collector._page.url = "https://data.cdc.gov/view/yctb-fv7w/about_data"
+        self.collector._page.title = Mock(return_value="My Dataset")
+        resp = Mock(status_code=401)
+        mock_download.side_effect = requests.HTTPError(response=resp)
+        downloader = SocrataDatasetDownloader(self.collector)
+        mock_download_file = Mock(return_value=True)
+        with patch.object(Args, "use_url_download", True), \
+             patch.object(downloader, "_click_export_button", return_value=True), \
+             patch.object(downloader, "_download_file", mock_download_file):
+            result = downloader.download(self.temp_dir, timeout=60000)
+        self.assertTrue(result)
+        mock_download_file.assert_called_once()
+
+    @patch("collectors.SocrataCollector.sync_playwright")
+    def test_download_generic_exception_records_error(self, mock_playwright: Mock) -> None:
+        """download() records error and returns False on generic exception."""
+        setup_mock_playwright(mock_playwright)
+        self.collector._init_browser()
+        self.collector._page.url = "https://data.cdc.gov/view/abc/about_data"
+        downloader = SocrataDatasetDownloader(self.collector)
+        with patch.object(Args, "use_url_download", True), \
+             patch("collectors.SocrataDatasetDownloader.record_error") as mock_record_error, \
+             patch.object(downloader, "_download_via_constructed_url", side_effect=RuntimeError("network error")):
+            result = downloader.download(self.temp_dir)
+        self.assertFalse(result)
+        mock_record_error.assert_called_once()
+        self.assertIn("network error", mock_record_error.call_args[0][1])

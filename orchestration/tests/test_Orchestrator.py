@@ -146,3 +146,125 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(call_kw.get("host"), "127.0.0.1")
         self.assertEqual(call_kw.get("port"), 5000)
         self.assertFalse(call_kw.get("debug"))
+
+    @patch("orchestration.Orchestrator._find_module_class")
+    @patch("storage.Storage")
+    def test_run_noop_returns_early(self, mock_storage_cls: MagicMock, mock_find_class: MagicMock) -> None:
+        """Test run('noop') never loads a module class and returns after logging."""
+        with patch("orchestration.Orchestrator.Storage", mock_storage_cls):
+            Orchestrator.run("noop")
+        mock_storage_cls.initialize.assert_called_once()
+        mock_find_class.assert_not_called()
+
+    @patch("orchestration.Orchestrator._find_module_class")
+    @patch("storage.Storage")
+    def test_run_sourcing_with_delete_all_db_entries_clears_storage(
+        self, mock_storage_cls: MagicMock, mock_find_class: MagicMock
+    ) -> None:
+        """Test run with delete_all_db_entries calls Storage.clear_all_records."""
+        mock_storage = MagicMock()
+        mock_storage_cls.initialize.return_value = mock_storage
+        mock_storage_cls.get_instance.return_value = mock_storage
+        mock_sourcing_instance = MagicMock()
+        mock_find_class.return_value = MagicMock(return_value=mock_sourcing_instance)
+        with patch("orchestration.Orchestrator.Storage", mock_storage_cls), \
+             patch.object(Args, "delete_all_db_entries", True), \
+             patch("orchestration.Orchestrator.Logger") as mock_logger:
+            Orchestrator.run("sourcing")
+        mock_storage_cls.clear_all_records.assert_called_once()
+        mock_sourcing_instance.run.assert_called_once_with(-1)
+
+    @patch("orchestration.Orchestrator._find_module_class")
+    @patch("storage.Storage")
+    def test_run_publisher_lists_uploaded_not_found_no_links(
+        self, mock_storage_cls: MagicMock, mock_find_class: MagicMock
+    ) -> None:
+        """Test run('publisher') calls list_eligible_projects for uploaded, not_found, no_links and dedupes."""
+        mock_storage = MagicMock()
+        mock_storage_cls.initialize.return_value = mock_storage
+        mock_storage_cls.get_instance.return_value = mock_storage
+        # Return overlapping DRPIDs to test dedupe
+        mock_storage_cls.list_eligible_projects.side_effect = [
+            [{"DRPID": 2, "source_url": "https://a.com"}],
+            [{"DRPID": 2, "source_url": "https://a.com"}],
+            [{"DRPID": 3, "source_url": "https://b.com"}],
+        ]
+        mock_pub_instance = MagicMock()
+        mock_find_class.return_value = MagicMock(return_value=mock_pub_instance)
+        with patch("orchestration.Orchestrator.Storage", mock_storage_cls):
+            Orchestrator.run("publisher")
+        self.assertEqual(mock_storage_cls.list_eligible_projects.call_count, 3)
+        mock_storage_cls.list_eligible_projects.assert_any_call("uploaded", None, None, None)
+        mock_storage_cls.list_eligible_projects.assert_any_call("not_found", None, None, None)
+        mock_storage_cls.list_eligible_projects.assert_any_call("no_links", None, None, None)
+        self.assertEqual(mock_pub_instance.run.call_count, 2)  # DRPID 2 and 3
+
+    @patch("orchestration.Orchestrator._find_module_class")
+    @patch("storage.Storage")
+    def test_run_publisher_respects_num_rows(
+        self, mock_storage_cls: MagicMock, mock_find_class: MagicMock
+    ) -> None:
+        """Test run('publisher') limits projects to num_rows."""
+        mock_storage = MagicMock()
+        mock_storage_cls.initialize.return_value = mock_storage
+        mock_storage_cls.get_instance.return_value = mock_storage
+        mock_storage_cls.list_eligible_projects.side_effect = [
+            [{"DRPID": i, "source_url": f"https://{i}.com"} for i in range(1, 6)],
+            [],
+            [],
+        ]
+        mock_pub_instance = MagicMock()
+        mock_find_class.return_value = MagicMock(return_value=mock_pub_instance)
+        with patch("orchestration.Orchestrator.Storage", mock_storage_cls), \
+             patch.object(Args, "num_rows", 2):
+            Orchestrator.run("publisher")
+        self.assertEqual(mock_pub_instance.run.call_count, 2)
+
+    @patch("orchestration.Orchestrator._find_module_class")
+    @patch("storage.Storage")
+    def test_run_prereq_module_passes_start_row_start_drpid(
+        self, mock_storage_cls: MagicMock, mock_find_class: MagicMock
+    ) -> None:
+        """Test run with prereq passes start_row and start_drpid to list_eligible_projects."""
+        mock_storage = MagicMock()
+        mock_storage_cls.initialize.return_value = mock_storage
+        mock_storage_cls.get_instance.return_value = mock_storage
+        mock_storage_cls.list_eligible_projects.return_value = []
+        mock_find_class.return_value = MagicMock(return_value=MagicMock())
+        with patch("orchestration.Orchestrator.Storage", mock_storage_cls), \
+             patch.object(Args, "start_row", 5), \
+             patch.object(Args, "start_drpid", 100):
+            Orchestrator.run("catalog_collector")
+        mock_storage_cls.list_eligible_projects.assert_called_once_with("sourced", None, 5, 100)
+
+    @patch("orchestration.Orchestrator._stop_requested")
+    @patch("orchestration.Orchestrator._find_module_class")
+    @patch("storage.Storage")
+    def test_run_stop_requested_during_loop_exits(
+        self, mock_storage_cls: MagicMock, mock_find_class: MagicMock, mock_stop: MagicMock
+    ) -> None:
+        """Test run stops when _stop_requested returns True during single-threaded loop."""
+        mock_storage = MagicMock()
+        mock_storage_cls.initialize.return_value = mock_storage
+        mock_storage_cls.get_instance.return_value = mock_storage
+        mock_storage_cls.list_eligible_projects.return_value = [
+            {"DRPID": 1, "source_url": "https://one.com"},
+            {"DRPID": 2, "source_url": "https://two.com"},
+        ]
+        run_count = 0
+        def stop_after_first(*args, **kwargs):
+            nonlocal run_count
+            run_count += 1
+            return run_count > 1
+        mock_stop.side_effect = stop_after_first
+        mock_instance = MagicMock()
+        mock_find_class.return_value = MagicMock(return_value=mock_instance)
+        with patch("orchestration.Orchestrator.Storage", mock_storage_cls):
+            Orchestrator.run("catalog_collector")
+        mock_instance.run.assert_called_once_with(1)
+
+    def test_find_module_class_returns_sourcing(self) -> None:
+        """Test _find_module_class finds Sourcing in the project."""
+        from orchestration.Orchestrator import _find_module_class
+        cls = _find_module_class("Sourcing")
+        self.assertEqual(cls.__name__, "Sourcing")
