@@ -40,7 +40,7 @@ class TestArgs(unittest.TestCase):
         """Test sourcing-related defaults are present."""
         import sys
         sys.argv = ["test", "noop"]
-        Args.initialize()
+        Args.initialize(config_file=Path("/tmp/nonexistent_drp_test_config.json"))
         self.assertEqual(Args.sourcing_url_column, "URL")
         self.assertIsNone(Args.num_rows)  # Default is None (unlimited)
 
@@ -241,7 +241,7 @@ class TestArgs(unittest.TestCase):
         Args.initialize()
         self.assertEqual(Args.module, "collectors")
         self.assertEqual(Args.num_rows, 5)
-        self.assertEqual(Path(Args.db_path), Path("C:/data/drp.db"))
+        self.assertEqual(str(Args.db_path), "C:\\data\\drp.db")
         self.assertEqual(Args.storage_implementation, "StorageSQLLite")
 
     def test_start_row_from_cli(self) -> None:

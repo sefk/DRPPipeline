@@ -244,8 +244,9 @@ class TestCmsGovCollector(unittest.TestCase):
 
     @patch("collectors.CmsGovCollector.record_error")
     @patch("collectors.CmsGovCollector.requests.get")
+    @patch.object(CmsGovCollector, "_scrape_description")
     def test_collect_slug_missing_current_dataset_uuid(
-        self, mock_get: Mock, mock_record_error: Mock
+        self, mock_scrape: Mock, mock_get: Mock, mock_record_error: Mock
     ) -> None:
         mock_resp = Mock()
         mock_resp.raise_for_status.return_value = None

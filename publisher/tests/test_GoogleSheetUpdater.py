@@ -134,25 +134,23 @@ class TestGoogleSheetUpdater(unittest.TestCase):
         mock_from_sa.side_effect = FileNotFoundError()
         updater = GoogleSheetUpdater()
         cred = Path(tempfile.gettempdir()) / "nonexistent_creds.json"
-        success, msg = updater.update(
-            sheet_id="abc",
-            credentials_path=cred,
-            sheet_name="CDC",
-            source_url="https://example.com",
-            workspace_id="123",
-            project={},
-        )
+        with patch.object(Args, "google_sheet_id", "abc"), patch.object(
+            Args, "google_credentials", cred
+        ), patch.object(Args, "google_sheet_name", "CDC"):
+            success, msg = updater.update("https://example.com", "123", {})
         self.assertFalse(success)
         self.assertIn("not found", (msg or "").lower())
 
     @skip_if_no_google
-    @patch("googleapiclient.discovery.build")
+    @patch("publisher.GoogleSheetUpdater.build")
     @patch("google.oauth2.service_account.Credentials.from_service_account_file")
     def test_update_success_mocked(
         self, mock_from_sa: MagicMock, mock_build: MagicMock
     ) -> None:
         """Test update success path with mocked Sheets API."""
-        mock_from_sa.return_value = MagicMock()
+        mock_creds = MagicMock()
+        mock_creds.universe_domain = "googleapis.com"
+        mock_from_sa.return_value = mock_creds
         mock_service = MagicMock()
 
         # First get: header row (CDC!1:1). Second get: URL column A2:A.

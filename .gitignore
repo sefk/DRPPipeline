@@ -64,5 +64,6 @@ desktop.ini
 
 debug/datalumos_search_response.html
 config.json
+google-credentials.json
 *.csv
 *.xlsx
