@@ -19,6 +19,7 @@ The DRP Pipeline is a Python-based data collection and processing system that:
 Projects move through a series of modules in order; each module updates status so the next can process eligible projects.
 
 ## Terminology
+
 -  project - all the work done on behalf of a single source url - named after a datalumos project
 -  asset - an individual file. projects usually have more than one file
 -  metadata - information not contained in a file - often represents information extracted from a landing page
@@ -38,18 +39,18 @@ Not all modules need to be used. For example, data can be collected by other mea
 ```
 DRPPipeline/
 ├── collectors/          # Data collection (e.g., SocrataCollector)
-├── cleanup_inprogress/ # Delete DataLumos projects in Deposit In Progress
-├── debug/              # Debug scripts
-├── docs/               # Setup, Usage, Google Sheets setup
-├── duplicate_checking/ # Duplicate detection (e.g., DataLumos search)
-├── orchestration/     # Orchestrator and module protocol
-├── publisher/         # DataLumos publish and optional Google Sheet update
-├── sourcing/          # Source URL discovery and project creation
-├── storage/           # Database storage (SQLite)
-├── upload/            # DataLumos upload (browser automation)
-├── utils/             # Args, Logger, file/URL utilities
-├── main.py            # Entry point
-└── requirements.txt   # Dependencies
+├── cleanup_inprogress/  # Delete DataLumos projects in Deposit In Progress
+├── debug/               # Debug scripts
+├── docs/                # Setup, Usage, Google Sheets setup
+├── duplicate_checking/  # Duplicate detection (e.g., DataLumos search)
+├── orchestration/       # Orchestrator and module protocol
+├── publisher/           # DataLumos publish and optional Google Sheet update
+├── sourcing/            # Source URL discovery and project creation
+├── storage/             # Database storage (SQLite)
+├── upload/              # DataLumos upload (browser automation)
+├── utils/               # Args, Logger, file/URL utilities
+├── main.py              # Entry point
+└── requirements.txt     # Dependencies
 ```
 
 ## Modules
