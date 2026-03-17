@@ -8,10 +8,10 @@ from the DRP spreadsheet, then compares the newly created DataLumos project
 (control, from column L "Download Location").
 
 Usage (from repo root):
-    python collectors/tools/e2e_test.py
-    python collectors/tools/e2e_test.py --title "Value Modifier"
-    python collectors/tools/e2e_test.py --skip-collect  # if already collected
-    python collectors/tools/e2e_test.py --skip-upload   # if already uploaded
+    python tests/e2e_test.py
+    python tests/e2e_test.py --title "Value Modifier"
+    python tests/e2e_test.py --skip-collect  # if already collected
+    python tests/e2e_test.py --skip-upload   # if already uploaded
 
 Results:
     GREEN  - treatment matches control closely
@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.request import Request, urlopen
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # Initialize Args before importing pipeline modules
 _argv_backup = sys.argv[:]
@@ -245,7 +245,7 @@ def phase_compare(workspace_id: str, control_id: str) -> tuple[dict, dict, list]
     every field.  Returns (treatment_data, control_data, checks).
     """
     print(f"\n{BOLD}Phase 4b: DataLumos comparison{RESET}")
-    from collectors.tools.compare_datalumos import run_comparison
+    from tests.compare_datalumos import run_comparison
     return run_comparison(workspace_id, control_id)
 
 
@@ -254,7 +254,7 @@ def phase_compare(workspace_id: str, control_id: str) -> tuple[dict, dict, list]
 def phase_report(prechecks: list, treatment: dict, control: dict,
                  checks: list, workspace_id: str, control_url: Optional[str]) -> str:
     """Print the combined report and return overall rating."""
-    from collectors.tools.compare_datalumos import print_report, overall_rating
+    from tests.compare_datalumos import print_report, overall_rating
 
     # Pre-checks failures are reported inline in phase_prechecks;
     # roll any FAIL pre-checks into the main checks list so they affect the rating.

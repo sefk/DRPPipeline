@@ -6,9 +6,9 @@ Prints column names and row values for a given row number or title match.
 Useful for understanding spreadsheet structure and finding project details.
 
 Usage (from repo root):
-    python collectors/tools/inspect_sheet.py --row 13
-    python collectors/tools/inspect_sheet.py --title "Value Modifier"
-    python collectors/tools/inspect_sheet.py --all   # print all rows
+    python tests/inspect_sheet.py --row 13
+    python tests/inspect_sheet.py --title "Value Modifier"
+    python tests/inspect_sheet.py --all   # print all rows
 """
 
 import argparse
@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from utils.Args import Args
 from utils.Logger import Logger

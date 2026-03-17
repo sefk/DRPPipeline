@@ -6,8 +6,8 @@ Reads all field values (title, agency, subject terms, geographic coverage, time 
 data types, summary, original URL, files) from both projects and compares them.
 
 Usage (from repo root):
-    python collectors/tools/compare_datalumos.py --treatment 246966 --control 244264
-    python collectors/tools/compare_datalumos.py --treatment 246966 --control 244264 --save-html
+    python tests/compare_datalumos.py --treatment 246966 --control 244264
+    python tests/compare_datalumos.py --treatment 246966 --control 244264 --save-html
 """
 
 import argparse
@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 _argv_backup = sys.argv[:]
 sys.argv = [sys.argv[0], "upload"]
