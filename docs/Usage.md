@@ -36,6 +36,7 @@ If the config file does not exist, a warning is shown but the pipeline continues
 | `sourcing_url_column` | — | yes | `URL` | Column name for candidate URLs in sourcing sheet |
 | `sourcing_url_prefix` | — | yes | `https://catalog.data.gov/` | Only source rows whose URL starts with this prefix; set to `""` for no filtering |
 | `sourcing_fetch_timeout` | — | yes | `15` | Seconds per URL when checking availability in sourcing |
+| `sourcing_mode` | yes (`--sourcing-mode`) | yes | `unclaimed` | Row filter: `unclaimed` (Claimed and Download Location empty), `completed` (Download Location filled), `all` (any row with a URL) |
 | `base_output_dir` | — | yes | `C:\Documents\DataRescue\DRPData` | Base directory for collected files |
 | `datalumos_username` | — | yes (required for upload) | — | DataLumos login email |
 | `datalumos_password` | — | yes (required for upload) | — | DataLumos password |
@@ -145,13 +146,33 @@ python main.py cleanup_inprogress --log-color
 | Module | Purpose |
 |--------|---------|
 | **noop** | No-op; useful for testing. |
-| **sourcing** | Fetches candidate URLs from the configured spreadsheet, checks duplicates, creates DB records. Requires `google_sheet_id`. |
+| **sourcing** | Fetches candidate URLs from the configured spreadsheet, checks duplicates, creates DB records. Requires `google_sheet_id`. Use `--sourcing-mode` to control which rows are selected (see below). |
 | **socrata_collector** | Collects data and metadata from Socrata-hosted pages (e.g. data.cdc.gov). Processes `status="sourced"`. |
 | **catalog_collector** | Collects download links from catalog.data.gov dataset pages. Processes `status="sourced"`. |
 | **interactive_collector** | Flask app for manual collection; SPA at `/collector/`. |
 | **upload** | Uploads collected data to DataLumos. Requires `datalumos_username`, `datalumos_password`. Processes `status="collected"`. |
 | **publisher** | Runs DataLumos publish; optionally updates Google Sheet. Processes `status="uploaded"`. |
 | **cleanup_inprogress** | Deletes DataLumos projects in Deposit In Progress state (no DB changes). |
+
+### Sourcing modes
+
+`--sourcing-mode` (or `sourcing_mode` in config) controls which spreadsheet rows are selected:
+
+| Mode | Rows selected |
+|------|---------------|
+| `unclaimed` (default) | `Claimed` empty **and** `Download Location` empty — unworked rows available for new collection |
+| `completed` | `Download Location` non-empty — rows already manually archived |
+| `all` | Any row with a non-empty URL, regardless of claim state |
+
+`sourcing_url_prefix` is applied on top of the mode filter in all cases.
+
+**Dev/test workflow:** use `completed` mode with a separate database to benchmark the automated pipeline against prior manual work:
+
+```bash
+python main.py sourcing --sourcing-mode completed --num-rows 10 --db-path benchmark.db
+python main.py cms_collector --db-path benchmark.db
+# compare benchmark.db results against the Download Location column in the sheet
+```
 
 ### Database
 
