@@ -38,11 +38,13 @@ Not all modules need to be used. For example, data can be collected by other mea
 
 ```
 DRPPipeline/
-├── collectors/          # Data collection (e.g., SocrataCollector)
+├── collectors/          # Data collection (e.g., SocrataCollector, CmsGovCollector)
 ├── cleanup_inprogress/  # Delete DataLumos projects in Deposit In Progress
 ├── debug/               # Debug scripts
 ├── docs/                # Setup, Usage, Google Sheets setup
 ├── duplicate_checking/  # Duplicate detection (e.g., DataLumos search)
+├── mcp_collector_dev/   # MCP 2: collector development tools
+├── mcp_server/          # MCP 1: pipeline orchestration tools
 ├── orchestration/       # Orchestrator and module protocol
 ├── publisher/           # DataLumos publish and optional Google Sheet update
 ├── sourcing/            # Source URL discovery and project creation
@@ -61,12 +63,32 @@ DRPPipeline/
 | **sourcing** | Fetches candidate URLs from a spreadsheet, checks duplicates, creates DB records. |
 | **socrata_collector** | Collects data and metadata from Socrata-hosted pages (e.g. data.cdc.gov). |
 | **catalog_collector** | Collects download links from catalog.data.gov dataset pages. |
-| **interactive_collector** | Flask app for manual collection: browse URLs, save PDFs, update metadata. |
+| **cms_collector** | Collects data from data.cms.gov API pages. |
+| **interactive_collector** | Flask app for manual collection: browse URLs, save PDFs, update metadata. Under active development; not managed by the orchestration MCP. |
 | **upload** | Uploads collected data to DataLumos via browser automation. |
 | **publisher** | Runs DataLumos publish workflow; also updates source inventory|
 | **cleanup_inprogress** | Standalone utility that deletes DataLumos workspace projects in “Deposit In Progress” state (no DB changes). |
 
 Each module (except `noop` and `cleanup_inprogress`) advances project `status` so the next module can run on eligible projects. See [Usage](docs/Usage.md) for how to run them and how the database is used.
+
+## MCP Servers
+
+The pipeline exposes two [Model Context Protocol](https://modelcontextprotocol.io/) servers that allow Claude (and other MCP-compatible clients) to drive the pipeline without writing code. Both are registered in `.mcp.json`.
+
+### MCP 1 — Pipeline Orchestration (`mcp_server/`)
+
+The primary interface for running and monitoring the pipeline. Tools:
+
+- **Query:** `get_pipeline_stats`, `list_projects`, `get_project`
+- **Execution:** `run_module` (dry-run by default)
+- **Write:** `update_project`, `clear_errors`, `set_project_status`, `delete_project`
+- **Verification:** `verify_module_run`, `check_project_files`
+
+All write tools default to `dry_run=True`. See [MCP.md](MCP.md) for the full design.
+
+### MCP 2 — Collector Development (`mcp_collector_dev/`)
+
+Tools for adding support for a new data source: inspecting a site, scaffolding a collector class, registering it with the Orchestrator, and running a test against a single project.
 
 ## Implementation details
 

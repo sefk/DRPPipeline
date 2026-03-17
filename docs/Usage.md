@@ -2,11 +2,62 @@
 
 This document describes how to use the pipeline. For installation, see [Setup](Setup.md).
 
-There are two ways to run the pipeline: the **SPA GUI** (interactive collector and pipeline controls) and the **command line** (per-module invocation).
+There are three ways to run the pipeline: the **MCP orchestration server** (AI-assisted, recommended), the **SPA GUI** (interactive collector and pipeline controls), and the **command line** (per-module invocation).
 
 ---
 
-## 1. Parameters
+## 1. MCP Orchestration (recommended)
+
+The pipeline ships with an MCP server (`mcp_server/server.py`) that lets Claude drive the pipeline interactively — inspecting state, running modules with dry-run previews, fixing errors, and verifying results — without writing code or memorizing command-line flags.
+
+### Setup
+
+The server is registered automatically for Claude Code via `.mcp.json`. For Claude Desktop, add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "drp-pipeline": {
+      "command": "/path/to/DRPPipeline/.venv/bin/python",
+      "args": ["/path/to/DRPPipeline/mcp_server/server.py"]
+    }
+  }
+}
+```
+
+### Available tools
+
+| Tool | Category | Description |
+|------|----------|-------------|
+| `get_pipeline_stats` | Query | Total counts by status, error counts, db path |
+| `list_projects` | Query | Filter by status and/or has_errors; paginated |
+| `get_project` | Query | Full record for a single DRPID |
+| `run_module` | Execution | Run any module; `dry_run=True` previews eligible projects |
+| `update_project` | Write | Update metadata fields; returns a diff |
+| `clear_errors` | Write | Clear errors so a project becomes eligible again |
+| `set_project_status` | Write | Manually set status (e.g. roll back to `sourced`) |
+| `delete_project` | Write | Remove a record (does not delete files) |
+| `verify_module_run` | Verification | Check how many projects reached expected status |
+| `check_project_files` | Verification | List files in a project's output folder |
+
+All write tools and `run_module` default to `dry_run=True`. See [MCP.md](../MCP.md) for the full design and safety model.
+
+### Typical session
+
+```
+1. get_pipeline_stats          → see overall state
+2. list_projects(has_errors=True) → find stuck projects
+3. get_project(drpid=5)        → inspect a specific project
+4. clear_errors(drpid=5)       → make it eligible again
+5. set_project_status(drpid=5, status="sourced") → roll back for re-collection
+6. run_module("cms_collector", dry_run=True)  → preview eligible projects
+7. run_module("cms_collector", dry_run=False) → execute
+8. verify_module_run("cms_collector")         → confirm results
+```
+
+---
+
+## 2. Parameters
 
 Configuration is resolved from (in order of priority, highest first):
 
@@ -81,7 +132,7 @@ For Google Sheets setup, see [GOOGLE_SHEETS_SETUP.md](GOOGLE_SHEETS_SETUP.md).
 
 ---
 
-## 2. SPA usage
+## 3. SPA usage
 
 The **interactive collector** and **pipeline controls** are available as a single-page app (SPA) or as a server-rendered legacy UI.
 
@@ -120,7 +171,7 @@ For sites that block automated access, use the browser extension to save PDFs fr
 
 ---
 
-## 3. Command line usage
+## 4. Command line usage
 
 ### Basic invocation
 
@@ -139,7 +190,7 @@ python main.py publisher
 python main.py cleanup_inprogress --log-color
 ```
 
-**Workflow order:** sourcing → socrata_collector / catalog_collector / interactive_collector → upload → publisher. Optional: cleanup_inprogress for stuck DataLumos projects.
+**Workflow order:** sourcing → socrata_collector / catalog_collector / cms_collector / interactive_collector → upload → publisher. Optional: cleanup_inprogress for stuck DataLumos projects.
 
 ### Modules
 
@@ -149,7 +200,8 @@ python main.py cleanup_inprogress --log-color
 | **sourcing** | Fetches candidate URLs from the configured spreadsheet, checks duplicates, creates DB records. Requires `google_sheet_id`. Use `--sourcing-mode` to control which rows are selected (see below). |
 | **socrata_collector** | Collects data and metadata from Socrata-hosted pages (e.g. data.cdc.gov). Processes `status="sourced"`. |
 | **catalog_collector** | Collects download links from catalog.data.gov dataset pages. Processes `status="sourced"`. |
-| **interactive_collector** | Flask app for manual collection; SPA at `/collector/`. |
+| **cms_collector** | Collects data from data.cms.gov API pages. Processes `status="sourced"`. |
+| **interactive_collector** | Flask app for manual collection; SPA at `/collector/`. Under active development; not managed by the orchestration MCP. |
 | **upload** | Uploads collected data to DataLumos. Requires `datalumos_username`, `datalumos_password`. Processes `status="collected"`. |
 | **publisher** | Runs DataLumos publish; optionally updates Google Sheet. Processes `status="uploaded"`. |
 | **cleanup_inprogress** | Deletes DataLumos projects in Deposit In Progress state (no DB changes). |
@@ -188,7 +240,7 @@ python main.py cms_collector --db-path benchmark.db
 
 ---
 
-## 4. Running tests
+## 5. Running tests
 
 From the project root, run the full test suite:
 
