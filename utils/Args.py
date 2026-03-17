@@ -58,6 +58,7 @@ class Args(metaclass=ArgsMeta):
     
     # Default values (lowest priority)
     _defaults: Dict[str, Any] = {
+        "module": None,       # Set from positional argument; None if not provided
         "config_file": None,  # Set from --config when provided
         "log_level": "INFO",
         "log_color": True,  # Set True with --log-color to color severity in terminal (only when TTY)
@@ -187,7 +188,7 @@ class Args(metaclass=ArgsMeta):
         
         def callback(
             ctx: typer.Context,
-            module: str = typer.Argument(..., help="Module to run: noop, sourcing, socrata_collector, catalog_collector, interactive_collector, upload, publisher, cleanup_inprogress"),
+            module: Optional[str] = typer.Argument(None, help="Module to run: setup, noop, sourcing, socrata_collector, catalog_collector, cms_collector, interactive_collector, upload, publisher, cleanup_inprogress, help"),
             config: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to configuration file (JSON format). Default: ./config.json"),
             log_level: Optional[str] = typer.Option(None, "--log-level", "-l", help="Set the logging level", case_sensitive=False),
             num_rows: Optional[int] = typer.Option(None, "--num-rows", "-n", help="Max projects or candidate URLs per batch; None = unlimited"),
