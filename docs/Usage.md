@@ -55,9 +55,35 @@ All write tools and `run_module` default to `dry_run=True`. See [MCP.md](../MCP.
 8. verify_module_run("cms_collector")         → confirm results
 ```
 
-### Worked example: recovery operations
+### Worked example: recovery operations (conversational)
 
-The following shows actual tool inputs and outputs for a recovery session.
+This example shows the natural-language prompts a recovery engineer might type to Claude, and what Claude would do in response. No knowledge of tool names or parameters is required.
+
+> **"How's the pipeline looking?"**
+
+Claude calls `get_pipeline_stats` and replies: *"You have 11 projects total. 8 are collected and ready to upload, 1 has been uploaded, and 2 are stuck with errors."*
+
+> **"What's wrong with the ones that have errors?"**
+
+Claude calls `list_projects(has_errors=True)` then `get_project` on each, and replies: *"Both errors are in the CMS collector — DRPIDs 5 and 8. The collector couldn't find an API slug for their source URLs. This often means the CMS site restructured that path."*
+
+> **"Clear the errors on both and roll them back so they get re-tried."**
+
+Claude calls `clear_errors` and `set_project_status` (dry run first, showing what will change), confirms with you, then applies both changes. *"Done. DRPIDs 5 and 8 are back to 'sourced' with no errors and will be picked up on the next collector run."*
+
+> **"Show me what the next upload batch would look like before we run it."**
+
+Claude calls `run_module("upload", dry_run=True, num_rows=5)` and replies: *"The next upload batch would process 5 projects: Skilled Nursing Facility Change of Ownership, Federally Qualified Health Center Enrollments, and 3 others. Want me to run it?"*
+
+> **"Yes, go ahead with those 5."**
+
+Claude calls `run_module("upload", dry_run=False, num_rows=5)`, waits for completion, then calls `verify_module_run("upload")` and reports: *"Upload finished. 5 projects advanced to 'uploaded', no new errors."*
+
+---
+
+### Worked example: recovery operations (tool-level)
+
+The following shows the underlying tool calls and exact outputs for the same scenario above.
 
 **Step 1 — Check overall state**
 
