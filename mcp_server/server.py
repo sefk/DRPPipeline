@@ -33,6 +33,7 @@ mcp = FastMCP("drp-pipeline")
 
 _MODULES: dict[str, dict[str, Optional[str]]] = {
     "noop":               {"prereq": None,       "output": None},
+    "setup":              {"prereq": None,       "output": None},
     "sourcing":           {"prereq": None,       "output": "sourced"},
     "socrata_collector":  {"prereq": "sourced",  "output": "collected"},
     "catalog_collector":  {"prereq": "sourced",  "output": "collected"},

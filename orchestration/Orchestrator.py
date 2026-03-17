@@ -56,6 +56,10 @@ MODULES: Dict[str, Dict[str, Any]] = {
         "prereq": None,
         "class_name": "CleanupInProgress",
     },
+    "setup": {
+        "prereq": None,
+        "class_name": "Setup",
+    },
 
 }
 
