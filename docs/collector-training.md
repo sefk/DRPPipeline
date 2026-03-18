@@ -84,28 +84,18 @@ extraction logic — repeating until quality plateaus.
         └────┬─────┘ └────┬─────┘ └────┬─────┘
              │             │            │
              v             v            v
-        ┌─────────────────────────────────────┐
-        │         Training Database           │
-        │  (iterations, scores, diffs, cost)  │
-        └──────────────┬──────────────────────┘
-                       │                ^
-                       │                │ reads
-                       v                │
-        ┌──────────────────────────────────────┐
-        │         Training Data Store          │
-        │  (human-verified ground truth)       │
-        └──────────────────────────────────────┘
-
-        ┌──────────────────────────────────────┐
-        │         Observer Console             │
-        │  (read-only view of live training)   │
-        │                                      │
-        │  score trend · active agents · cost  │
-        │  per-field breakdown · recent diffs  │
-        └──────────────────────────────────────┘
-                       │ reads
-                       v
-              Training Database (above)
+        ┌─────────────────────────┐    ┌──────────────────────────┐
+        │    Training Database    ├───>│    Observer Console      │
+        │  (iterations, scores,   │    │    (read-only live view) │
+        │   diffs, cost)          │    │                          │
+        └────────────┬────────────┘    │  score trend · agents    │
+                     │                 │  cost · field breakdown   │
+                     v                 └──────────────────────────┘
+        ┌─────────────────────────┐
+        │   Training Data Store   │
+        │  (human-verified ground │
+        │   truth)                │
+        └─────────────────────────┘
 ```
 
 ### Design principle: one collector per source
