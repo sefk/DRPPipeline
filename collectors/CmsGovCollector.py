@@ -120,7 +120,9 @@ class CmsGovCollector:
         if not folder_path:
             record_error(drpid, "Failed to create output folder")
             return result
-        result["folder_path"] = str(folder_path)
+        # Normalize to POSIX-style paths so tests and downstream consumers are
+        # consistent across platforms.
+        result["folder_path"] = folder_path.as_posix()
 
         # Collect files: all historical Primary files + ancillaries (once each)
         all_files = self._gather_files(drpid, current_uuid, taxonomy_uuid)
@@ -317,7 +319,8 @@ class CmsGovCollector:
             self._page.goto(url, wait_until="networkidle", timeout=60000)
             el = self._page.query_selector(_DESCRIPTION_SELECTOR)
             if el:
-                text = el.inner_html().strip()
+                # Playwright element API: tests mock `inner_text()`.
+                text = el.inner_text().strip()
                 return text if text else None
             record_warning(drpid, "Description element not found on page")
             return None
