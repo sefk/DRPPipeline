@@ -317,7 +317,7 @@ class CmsGovCollector:
             self._page.goto(url, wait_until="networkidle", timeout=60000)
             el = self._page.query_selector(_DESCRIPTION_SELECTOR)
             if el:
-                text = el.inner_text().strip()
+                text = el.inner_html().strip()
                 return text if text else None
             record_warning(drpid, "Description element not found on page")
             return None
