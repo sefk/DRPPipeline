@@ -500,13 +500,18 @@ def register_collector(
 # ── testing tools ─────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def test_collector_on_project(module_name: str, drpid: int) -> str:
+def test_collector_on_project(module_name: str, drpid: int,
+                              return_raw: bool = False) -> str:
     """
     Run a collector against a single project (--num-rows 1 --start-drpid <drpid>).
 
     Returns the Storage record before and after, files created in the output
     folder, and any errors recorded. Makes real network requests and writes
     files to disk.
+
+    If return_raw=True, returns a JSON string with the structured post-run
+    record (all Storage fields + files list) instead of the human-readable
+    report. Used by the training system for scoring.
     """
     orchestrator_text = ORCHESTRATOR_FILE.read_text(encoding="utf-8")
     if f'"{module_name}"' not in orchestrator_text:
@@ -576,6 +581,17 @@ def test_collector_on_project(module_name: str, drpid: int) -> str:
             size = f.stat().st_size if f.is_file() else 0
             folder_files.append(f"  {f.name}  ({size:,} bytes)")
 
+    if return_raw:
+        # Structured output for the training scoring system
+        raw_output = dict(record_after)
+        raw_output["files"] = [
+            {"name": Path(f.split("  ")[0].strip()).name}
+            for f in folder_files
+        ]
+        if record_after.get("status") == "error" or record_after.get("errors"):
+            raw_output["_crashed"] = True
+        return json.dumps(raw_output)
+
     parts = [
         f"=== test_collector_on_project: {module_name!r} on DRPID {drpid} ===",
         f"Exit code: {returncode}",
@@ -595,6 +611,384 @@ def test_collector_on_project(module_name: str, drpid: int) -> str:
         parts += ["", "── Errors recorded in Storage ──", f"  {record_after['errors']}"]
 
     return "\n".join(parts)
+
+
+# ── training tools ────────────────────────────────────────────────────────────
+
+def _get_training_db() -> Any:
+    """Return the training DB path from project root."""
+    return PROJECT_ROOT / "collector_training.db"
+
+
+@mcp.tool()
+def start_training_run(
+    collector_name: str,
+    collector_module_name: str,
+    source_site: str,
+    max_iterations: int = 20,
+    max_cost_usd: float = 10.0,
+    model_refine: str = "claude-sonnet-4-6",
+    notes: str = "",
+) -> str:
+    """
+    Initialize a new collector training run.
+
+    Args:
+        collector_name:        Python class name (e.g. "CmsGovCollector")
+        collector_module_name: Pipeline module name (e.g. "cms_collector")
+        source_site:           Source site hostname (e.g. "data.cms.gov")
+        max_iterations:        Hard cap on iterations (default 20)
+        max_cost_usd:          Budget ceiling in USD (default $10.00)
+        model_refine:          Model for code refinement (default claude-sonnet-4-6)
+        notes:                 Free-form notes about this run
+
+    Returns run_id that can be passed to other training tools.
+    """
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT))
+        from collector_training.schema import init_db
+        from collector_training.coordinator import TrainingConfig, TrainingCoordinator
+
+        init_db()
+        config = TrainingConfig(
+            collector_name=collector_name,
+            collector_module_name=collector_module_name,
+            source_site=source_site,
+            max_iterations=max_iterations,
+            max_cost_usd=max_cost_usd,
+            model_refine=model_refine,
+            notes=notes,
+        )
+        coord = TrainingCoordinator(config)
+        run_id = coord.create_run()
+        return (
+            f"Created training run {run_id} for {collector_name!r}.\n"
+            f"Next steps:\n"
+            f"  1. import_training_data(run_id={run_id}, ...)\n"
+            f"  2. evaluate_collector(run_id={run_id}) — to score the baseline\n"
+            f"  3. Run the full training loop via TrainingCoordinator.run({run_id})"
+        )
+    except Exception as e:
+        return f"Error starting training run: {e}"
+
+
+@mcp.tool()
+def import_training_data(
+    run_id: int,
+    sheet_id: str,
+    sheet_gid: str,
+    url_column: str = "URL",
+    status_column: str = "Status",
+    done_value: str = "DONE",
+    download_location_column: str = "Download Location",
+    max_rows: int = 100,
+    scrape_datalumos: bool = False,
+) -> str:
+    """
+    Import training examples from a Google Sheets CSV export.
+
+    Fetches rows with status == done_value and imports source URLs.
+    If scrape_datalumos=True, also scrapes DataLumos for ground truth
+    (requires Playwright + DataLumos login).
+
+    For faster setup, set scrape_datalumos=False and provide ground truth
+    via collector_training.importer.import_from_json_file() instead.
+
+    Args:
+        run_id:                  Training run ID (from start_training_run)
+        sheet_id:                Google Sheets document ID
+        sheet_gid:               Worksheet GID (visible in URL ?gid=XXXX)
+        url_column:              Column header containing source URLs
+        status_column:           Column header containing row status
+        done_value:              Status value that marks completed rows
+        download_location_column: Column with DataLumos workspace URL/ID
+        max_rows:                Max rows to import (default 100)
+        scrape_datalumos:        Whether to scrape DataLumos for ground truth
+    """
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT))
+        from collector_training.importer import (
+            import_from_spreadsheet,
+            assign_train_validation_split,
+        )
+        count = import_from_spreadsheet(
+            run_id=run_id,
+            sheet_id=sheet_id,
+            sheet_gid=sheet_gid,
+            url_column=url_column,
+            status_column=status_column,
+            done_value=done_value,
+            download_location_column=download_location_column,
+            max_rows=max_rows,
+            scrape_datalumos=scrape_datalumos,
+        )
+        n_train, n_val = assign_train_validation_split(run_id)
+        return (
+            f"Imported {count} training examples for run {run_id}.\n"
+            f"Split: {n_train} training / {n_val} validation\n"
+            f"Note: ground truth fields will be empty unless scrape_datalumos=True\n"
+            f"      or you call import_from_json_file() with pre-scraped data."
+        )
+    except Exception as e:
+        return f"Error importing training data: {e}"
+
+
+@mcp.tool()
+def evaluate_collector(
+    run_id: int,
+    iteration_num: int = 0,
+) -> str:
+    """
+    Run the current collector version against all training examples and score them.
+
+    Uses the collector code saved for iteration_num (0 = initial/current file).
+    Results are written to the training database.
+
+    Returns aggregate score and per-field breakdown.
+    """
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT))
+        import sqlite3 as _sqlite3
+        from collector_training.schema import get_connection, init_eval_db
+        from collector_training.importer import list_examples
+        from collector_training.trainer import CollectorEvaluator, per_field_averages
+        from collector_training.coordinator import VERSIONS_DIR
+
+        # Get run config
+        db = _get_training_db()
+        con = get_connection(db)
+        try:
+            run_row = con.execute(
+                "SELECT * FROM training_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if not run_row:
+                return f"Error: run_id={run_id} not found."
+            run = dict(run_row)
+            import json as _json
+            config = _json.loads(run.get("config_json") or "{}")
+        finally:
+            con.close()
+
+        collector_name = run["collector_name"]
+        module_name = config.get("collector_module_name", "")
+        collector_file = PROJECT_ROOT / "collectors" / f"{collector_name}.py"
+
+        # Load code for this iteration
+        version_file = VERSIONS_DIR / f"{collector_name}_run{run_id}_v{iteration_num}.py"
+        if version_file.exists():
+            code = version_file.read_text(encoding="utf-8")
+        else:
+            code = collector_file.read_text(encoding="utf-8")
+
+        examples = list_examples(run_id, include_validation=False, db_path=db)
+        if not examples:
+            return f"No training examples found for run_id={run_id}. Import data first."
+
+        evaluator = CollectorEvaluator(
+            collector_module_name=module_name,
+            collector_file=collector_file,
+        )
+        results = evaluator.evaluate_all(examples, code, num_workers=1)
+        aggregate = sum(r["score"] for r in results) / len(results) if results else 0.0
+        field_avgs = per_field_averages([r["per_field"] for r in results])
+
+        lines = [
+            f"Evaluation — run {run_id}, iteration {iteration_num}",
+            f"  Examples:        {len(results)}",
+            f"  Aggregate score: {aggregate:.3f}",
+            "",
+            "  Per-field scores:",
+        ]
+        for field, score in sorted(field_avgs.items(), key=lambda x: x[1]):
+            bar = "█" * int(score * 20) + "░" * (20 - int(score * 20))
+            lines.append(f"    {field:<22}  {score:.3f}  {bar}")
+
+        worst = sorted(results, key=lambda r: r["score"])[:3]
+        if worst:
+            lines += ["", "  Worst cases:"]
+            for r in worst:
+                lines.append(f"    {r['score']:.3f}  {r['source_url']}")
+                if r.get("error_message"):
+                    lines.append(f"           Error: {r['error_message']}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error evaluating collector: {e}"
+
+
+@mcp.tool()
+def get_training_status(run_id: int) -> str:
+    """
+    Show the current state of a training run: iterations, scores, cost, best result.
+    """
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT))
+        from collector_training.schema import get_connection
+
+        db = _get_training_db()
+        con = get_connection(db)
+        try:
+            run_row = con.execute(
+                "SELECT * FROM training_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if not run_row:
+                return f"Error: run_id={run_id} not found."
+            run = dict(run_row)
+
+            iterations = con.execute(
+                "SELECT iteration_num, aggregate_score, model_used, started_at, finished_at "
+                "FROM iterations WHERE run_id=? ORDER BY iteration_num",
+                (run_id,),
+            ).fetchall()
+
+            cost_row = con.execute(
+                "SELECT COALESCE(SUM(cost_usd),0), COUNT(*) FROM token_usage WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+
+            example_counts = con.execute(
+                "SELECT is_validation, COUNT(*) FROM training_examples "
+                "WHERE run_id=? GROUP BY is_validation",
+                (run_id,),
+            ).fetchall()
+        finally:
+            con.close()
+
+        ec = {row[0]: row[1] for row in example_counts}
+        n_train = ec.get(0, 0)
+        n_val = ec.get(1, 0)
+
+        lines = [
+            f"Training Run {run_id}: {run['collector_name']} ({run['source_site']})",
+            f"  Status:     {run.get('status', '?').upper()}",
+            f"  Started:    {(run.get('started_at') or '')[:19].replace('T',' ')}",
+        ]
+        if run.get("finished_at"):
+            lines.append(f"  Finished:   {run['finished_at'][:19].replace('T',' ')}")
+        lines += [
+            f"  Examples:   {n_train} training / {n_val} validation",
+            f"  Iterations: {len(iterations)} completed",
+            f"  Cost:       ${cost_row[0]:.4f} ({cost_row[1]} LLM calls)",
+            "",
+            "  Score trajectory:",
+        ]
+
+        for it in iterations:
+            score_str = f"{it['aggregate_score']:.3f}" if it["aggregate_score"] is not None else "(pending)"
+            marker = " ← best" if it["iteration_num"] == run.get("best_iteration") else ""
+            lines.append(f"    Iteration {it['iteration_num']:>2}: {score_str}  [{it['model_used'] or '?'}]{marker}")
+
+        if run.get("best_score") is not None:
+            lines += [
+                "",
+                f"  Best score: {run['best_score']:.3f} (iteration {run.get('best_iteration')})",
+            ]
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error getting training status: {e}"
+
+
+@mcp.tool()
+def get_iteration_details(run_id: int, iteration_num: int) -> str:
+    """
+    Show per-project scores, diffs, and field breakdown for a specific iteration.
+    """
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT))
+        import json as _json
+        from collector_training.schema import get_connection
+
+        db = _get_training_db()
+        con = get_connection(db)
+        try:
+            it_row = con.execute(
+                "SELECT * FROM iterations WHERE run_id=? AND iteration_num=?",
+                (run_id, iteration_num),
+            ).fetchone()
+            if not it_row:
+                return f"Iteration {iteration_num} not found for run {run_id}."
+            it = dict(it_row)
+
+            scores = con.execute(
+                "SELECT ps.*, te.source_url FROM project_scores ps "
+                "JOIN training_examples te ON ps.example_id = te.example_id "
+                "WHERE ps.iteration_id=? ORDER BY ps.score ASC",
+                (it["iteration_id"],),
+            ).fetchall()
+        finally:
+            con.close()
+
+        lines = [
+            f"Iteration {iteration_num} — run {run_id}",
+            f"  Aggregate score: {it.get('aggregate_score', '?')}",
+            f"  Model:           {it.get('model_used', '?')}",
+            f"  Strategy:        {it.get('refinement_strategy', '(none)')}",
+            "",
+        ]
+
+        if it.get("per_field_scores_json"):
+            field_scores = _json.loads(it["per_field_scores_json"])
+            lines.append("  Per-field averages:")
+            for f, s in sorted(field_scores.items(), key=lambda x: x[1]):
+                bar = "█" * int(s * 20) + "░" * (20 - int(s * 20))
+                lines.append(f"    {f:<22}  {s:.3f}  {bar}")
+            lines.append("")
+
+        lines.append(f"  Per-project scores ({len(scores)} projects):")
+        for row in scores:
+            score = row["score"]
+            url = row["source_url"] or "?"
+            err = row["error_message"] or ""
+            lines.append(f"    {score:.3f}  {url}")
+            if err:
+                lines.append(f"           Error: {err[:100]}")
+            if row["diff_json"]:
+                diff = _json.loads(row["diff_json"])
+                for field, d in diff.items():
+                    exp = d.get("expected")
+                    act = d.get("actual")
+                    if exp != act and exp is not None:
+                        lines.append(f"           {field}: expected={str(exp)[:50]!r} actual={str(act)[:50]!r}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error getting iteration details: {e}"
+
+
+@mcp.tool()
+def stop_training_run(run_id: int) -> str:
+    """
+    Mark a training run as stopped. In-flight iterations will complete, then stop.
+
+    Note: this sets the DB status to 'stopped'. The coordinator checks this flag
+    each iteration. A currently-running coordinator will stop at the next iteration
+    boundary.
+    """
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT))
+        from collector_training.schema import get_connection
+        import datetime as _dt
+
+        db = _get_training_db()
+        con = get_connection(db)
+        try:
+            row = con.execute(
+                "SELECT status FROM training_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if not row:
+                return f"Error: run_id={run_id} not found."
+            now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+            con.execute(
+                "UPDATE training_runs SET status='stopped', finished_at=? WHERE run_id=?",
+                (now, run_id),
+            )
+            con.commit()
+        finally:
+            con.close()
+        return f"Run {run_id} marked as stopped. Active iterations will complete normally."
+    except Exception as e:
+        return f"Error stopping training run: {e}"
 
 
 if __name__ == "__main__":

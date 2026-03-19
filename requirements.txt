@@ -2,6 +2,8 @@
 # Add dependencies here as the project develops
 
 typer>=0.9.0
+anthropic>=0.40.0
+dspy-ai>=2.5.0
 pytest>=7.0.0
 pytest-cov>=4.0.0
 playwright>=1.49.0

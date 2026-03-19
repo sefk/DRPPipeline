@@ -827,6 +827,349 @@ system to dispatch parallel work:
 
 ---
 
+## How to Run
+
+### Prerequisites
+
+1. Install new dependencies:
+
+   ```bash
+   pip install anthropic dspy-ai
+   # or: pip install -r requirements.txt
+   ```
+
+2. Add your Anthropic API key to the environment:
+
+   ```bash
+   export ANTHROPIC_API_KEY=sk-ant-...
+   ```
+
+3. Make sure `config.json` has `base_output_dir` set to a writable directory.
+   The evaluator creates output folders there when running the collector.
+
+---
+
+### Step 1 — Import training data
+
+Training data must be loaded before starting the loop. There are two paths:
+
+**A. From a pre-scraped JSON file (fastest, no browser required)**
+
+Create a JSON file with one object per training example:
+
+```json
+[
+  {
+    "source_url": "https://data.cms.gov/some-dataset",
+    "control_datalumos_id": "246966",
+    "annotator": "alice",
+    "ground_truth": {
+      "title": "Medicare Part D Drug Spending",
+      "agency": "Centers for Medicare & Medicaid Services",
+      "summary": "...",
+      "keywords": "medicare, drug spending, part d",
+      "time_start": "2013",
+      "time_end": "2022",
+      "data_types": "tabular",
+      "files": [{"name": "Medicare_Part_D_Drug_Spending_2022.csv"}],
+      "collection_notes": "Downloaded from CMS open data portal.",
+      "geographic_coverage": "United States"
+    }
+  }
+]
+```
+
+Then import and run:
+
+```python
+from collector_training.schema import init_db
+from collector_training.coordinator import TrainingConfig, TrainingCoordinator
+from collector_training.importer import import_from_json_file, assign_train_validation_split
+
+init_db()
+
+config = TrainingConfig(
+    collector_name="CmsGovCollector",        # Class name (file: collectors/CmsGovCollector.py)
+    collector_module_name="cms_collector",   # Registered module name in Orchestrator
+    source_site="data.cms.gov",
+    max_iterations=20,
+    max_cost_usd=5.00,
+    model_refine="claude-sonnet-4-6",
+)
+coord = TrainingCoordinator(config)
+run_id = coord.create_run()                 # Saves v0 from the current collector file
+
+import_from_json_file(run_id, "my_training_data.json")
+n_train, n_val = assign_train_validation_split(run_id)
+print(f"Run {run_id}: {n_train} training, {n_val} validation examples")
+```
+
+**B. From Google Sheets (requires the sheet to be world-readable)**
+
+```python
+from collector_training.importer import import_from_spreadsheet, assign_train_validation_split
+
+# sheet_id and gid from the spreadsheet URL
+count = import_from_spreadsheet(
+    run_id=run_id,
+    sheet_id="1OYLn6NBWStOgPUTJfYpU0y0g4uY7roIPP4qC2YztgWY",
+    sheet_gid="864890349",
+    url_column="URL",
+    status_column="Status",
+    done_value="DONE",
+    download_location_column="Download Location",
+    scrape_datalumos=True,    # Requires Playwright + DataLumos login in config.json
+)
+assign_train_validation_split(run_id)
+```
+
+---
+
+### Step 2 — Run the training loop
+
+```python
+result = coord.run(run_id)
+
+print(f"Best score:     {result.best_score:.3f}")
+print(f"Best iteration: {result.best_iteration}")
+print(f"Total cost:     ${result.total_cost_usd:.4f}")
+print(f"Stop reason:    {result.stop_reason}")
+print(f"Best collector: {result.best_collector_path}")
+```
+
+The coordinator writes versioned collector files to
+`collector_training/versions/` and copies the best-scoring version back to
+`collectors/CmsGovCollector.py` when done.
+
+**One-shot convenience wrapper:**
+
+```python
+result = coord.start_and_run()   # create_run() + run() in one call
+```
+
+---
+
+### Step 3 — Watch with the observer console
+
+In a second terminal, while training is running:
+
+```bash
+python -m collector_training.observer <run_id>
+# With options:
+python -m collector_training.observer 7 --interval 10 --db collector_training.db
+```
+
+Press `q` + Enter to quit the observer. Training continues unaffected.
+
+---
+
+### Step 4 — Inspect results
+
+```python
+from collector_training.schema import get_connection
+
+con = get_connection()
+
+# Score trajectory
+for row in con.execute(
+    "SELECT iteration_num, aggregate_score, model_used "
+    "FROM iterations WHERE run_id=? ORDER BY iteration_num", (run_id,)
+):
+    print(f"  Iter {row['iteration_num']:>2}: {row['aggregate_score']:.3f}  [{row['model_used']}]")
+
+# Total cost
+cost = con.execute(
+    "SELECT SUM(cost_usd) FROM token_usage WHERE run_id=?", (run_id,)
+).fetchone()[0]
+print(f"Total cost: ${cost:.4f}")
+
+# Worst-scoring training examples
+for row in con.execute("""
+    SELECT te.source_url, AVG(ps.score) as avg_score
+    FROM project_scores ps
+    JOIN training_examples te ON ps.example_id = te.example_id
+    JOIN iterations it ON ps.iteration_id = it.iteration_id
+    WHERE it.run_id=?
+    GROUP BY te.example_id
+    ORDER BY avg_score ASC
+    LIMIT 5
+""", (run_id,)):
+    print(f"  {row['avg_score']:.3f}  {row['source_url']}")
+
+con.close()
+```
+
+---
+
+### Using the MCP tools (from Claude Code / agent context)
+
+The `drp-collector-dev` MCP server exposes the training workflow as tools that
+Claude can call on your behalf. You interact with Claude in natural language;
+Claude calls the tools and reports back. Below are representative exchanges.
+
+---
+
+**Starting a training run**
+
+> *You:* Start a training run for the CMS collector. Use a $5 budget.
+
+Claude calls `start_training_run(collector_name="CmsGovCollector",
+collector_module_name="cms_collector", source_site="data.cms.gov",
+max_cost_usd=5.0)` and replies:
+
+```
+Created training run 7 for 'CmsGovCollector'.
+Next steps:
+  1. import_training_data(run_id=7, ...)
+  2. evaluate_collector(run_id=7) — to score the baseline
+  3. Run the full training loop via TrainingCoordinator.run(7)
+```
+
+---
+
+**Importing training data**
+
+> *You:* Import training data for run 7 from the CMS spreadsheet
+> (sheet ID 1OYLn6NBWStOgPUTJfYpU0y0g4uY7roIPP4qC2YztgWY, gid 864890349).
+
+Claude calls `import_training_data(run_id=7,
+sheet_id="1OYLn6NBWStOgPUTJfYpU0y0g4uY7roIPP4qC2YztgWY",
+sheet_gid="864890349")` and replies:
+
+```
+Imported 18 training examples for run 7.
+Split: 14 training / 4 validation
+Note: ground truth fields will be empty unless scrape_datalumos=True
+      or you call import_from_json_file() with pre-scraped data.
+```
+
+---
+
+**Scoring the baseline**
+
+> *You:* Score the current CMS collector against the training set (run 7,
+> iteration 0).
+
+Claude calls `evaluate_collector(run_id=7, iteration_num=0)` and replies:
+
+```
+Evaluation — run 7, iteration 0
+  Examples:        14
+  Aggregate score: 0.412
+
+  Per-field scores:
+    files                   0.21  ████░░░░░░░░░░░░░░░░
+    time_start              0.44  ████████░░░░░░░░░░░░
+    keywords                0.55  ███████████░░░░░░░░░
+    summary                 0.67  █████████████░░░░░░░
+    title                   0.89  █████████████████░░░
+
+  Worst cases:
+    0.18  https://data.cms.gov/medicare-part-d/drug-spending
+    0.22  https://data.cms.gov/provider-data/dataset/mj5m-pzi6
+    0.31  https://data.cms.gov/...
+```
+
+---
+
+**Checking on a running training loop**
+
+> *You:* What's the status of training run 7?
+
+Claude calls `get_training_status(run_id=7)` and replies:
+
+```
+Training Run 7: CmsGovCollector (data.cms.gov)
+  Status:     RUNNING
+  Started:    2026-03-18 14:02
+  Examples:   14 training / 4 validation
+  Iterations: 3 completed
+  Cost:       $0.43 (12 LLM calls)
+
+  Score trajectory:
+    Iteration  0: 0.412  [—]
+    Iteration  1: 0.581  [claude-sonnet-4-6]
+    Iteration  2: 0.634  [claude-sonnet-4-6]
+    Iteration  3: 0.701  [claude-sonnet-4-6]  ← best
+```
+
+---
+
+**Drilling into a specific iteration**
+
+> *You:* Show me what went wrong in iteration 2 of run 7 — specifically for
+> the projects that scored below 0.5.
+
+Claude calls `get_iteration_details(run_id=7, iteration_num=2)` and replies with
+per-project scores and field-level diffs, e.g.:
+
+```
+Iteration 2 — run 7
+  Aggregate score: 0.634
+  Model:           claude-sonnet-4-6
+
+  Per-field averages:
+    files                   0.41  ████████░░░░░░░░░░░░
+    ...
+
+  Per-project scores (14 projects):
+    0.28  https://data.cms.gov/medicare-part-d/drug-spending
+           files: expected=['Medicare_Part_D_Drug_Spending_2022.csv'] actual=[]
+           title: expected='Medicare Part D Drug Spending' actual='Drug Spending'
+    ...
+```
+
+---
+
+**Stopping the run early**
+
+> *You:* Stop training run 7.
+
+Claude calls `stop_training_run(run_id=7)` and replies:
+
+```
+Run 7 marked as stopped. Active iterations will complete normally.
+```
+
+---
+
+**MCP tool reference**
+
+The underlying tools and their parameters:
+
+| Tool | Purpose |
+|------|---------|
+| `start_training_run(collector_name, collector_module_name, source_site, max_iterations, max_cost_usd, model_refine, notes)` | Create a new training run; returns `run_id` |
+| `import_training_data(run_id, sheet_id, sheet_gid, url_column, status_column, done_value, download_location_column, max_rows, scrape_datalumos)` | Populate training examples from a spreadsheet |
+| `evaluate_collector(run_id, iteration_num)` | Score a collector version against all training examples |
+| `get_training_status(run_id)` | Summary: iteration count, score trajectory, cost |
+| `get_iteration_details(run_id, iteration_num)` | Per-project scores and field-level diffs for one iteration |
+| `stop_training_run(run_id)` | Gracefully stop at next iteration boundary |
+
+---
+
+### Rollback
+
+If training produced a regression, roll back to the best-scoring version:
+
+```python
+from collector_training.coordinator import rollback_to_best
+
+best_iter = rollback_to_best(run_id=7)
+# Copies collectors/versions/CmsGovCollector_run7_v{best_iter}.py
+# back to collectors/CmsGovCollector.py
+```
+
+---
+
+### Running tests
+
+```bash
+python -m pytest tests/test_scoring.py -v
+```
+
+---
+
 ## Observer Console
 
 A training run can take many iterations and several minutes to hours. The
