@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "drp-pipeline": {
+      "command": ".venv/bin/python",
+      "args": ["mcp_server/server.py"]
+    },
+    "drp-collector-dev": {
+      "command": ".venv/bin/python",
+      "args": ["mcp_collector_dev/server.py"]
+    }
+  }
+}

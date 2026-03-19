@@ -25,6 +25,7 @@ venv/
 ENV/
 env/
 .venv
+.envrc
 
 # IDEs
 .vscode/
@@ -59,10 +60,10 @@ htmlcov/
 Thumbs.db
 desktop.ini
 
-
-
+.claude
 
 debug/datalumos_search_response.html
 config.json
+google-credentials.json
 *.csv
 *.xlsx

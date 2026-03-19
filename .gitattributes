@@ -1,8 +1,2 @@
-# Auto detect text files and perform LF -> CRLF normalization
-* text=auto
-
-# Force CRLF for text files on Windows
-*.py text eol=crlf
-*.txt text eol=crlf
-*.json text eol=crlf
-*.md text eol=crlf
+# Auto detect text files and normalize to LF
+* text=auto eol=lf

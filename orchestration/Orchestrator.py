@@ -38,7 +38,11 @@ MODULES: Dict[str, Dict[str, Any]] = {
     },
     "catalog_collector": {
         "prereq": "sourced",
-        "class_name": "CatalogDataCollector",  
+        "class_name": "CatalogDataCollector",
+    },
+    "cms_collector": {
+        "prereq": "sourced",
+        "class_name": "CmsGovCollector",
     }
     ,"upload": {
         "prereq": "collected",
@@ -51,6 +55,10 @@ MODULES: Dict[str, Dict[str, Any]] = {
     "cleanup_inprogress": {
         "prereq": None,
         "class_name": "CleanupInProgress",
+    },
+    "setup": {
+        "prereq": None,
+        "class_name": "Setup",
     },
 
 }

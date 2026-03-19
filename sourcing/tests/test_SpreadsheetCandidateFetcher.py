@@ -40,6 +40,7 @@ class TestSpreadsheetCandidateFetcher(unittest.TestCase):
         Args._config["google_sheet_id"] = "test_sheet_id"
         Args._config["google_sheet_name"] = "CDC"
         Args._config["google_credentials"] = self._creds_file.name
+        Args._config["sourcing_mode"] = "unclaimed"
         Logger.initialize(log_level="WARNING")
         self.fetcher = SpreadsheetCandidateFetcher()
 
@@ -91,7 +92,7 @@ class TestSpreadsheetCandidateFetcher(unittest.TestCase):
         self.assertIn("Download Location", str(cm.exception))
 
     def test_row_passes_filter_both_empty(self) -> None:
-        """Test _row_passes_filter returns True when Claimed and Download Location empty and URL is catalog.data.gov."""
+        """Test _row_passes_filter returns True when Claimed and Download Location empty and URL matches sourcing_url_prefix."""
         row = {"Claimed (add your name)": "", "Download Location": "", "URL": "https://catalog.data.gov/dataset/x"}
         self.assertTrue(self.fetcher._row_passes_filter(row))
 
@@ -106,9 +107,25 @@ class TestSpreadsheetCandidateFetcher(unittest.TestCase):
         self.assertFalse(self.fetcher._row_passes_filter(row))
 
     def test_row_passes_filter_missing_url_treated_empty_fails(self) -> None:
-        """Test _row_passes_filter returns False when URL is missing (empty); requires catalog.data.gov."""
-        # Missing URL yields "".startswith("https://catalog.data.gov/") -> False.
+        """Test _row_passes_filter returns False when URL is missing (empty); requires matching sourcing_url_prefix."""
+        # Missing URL yields "".startswith(prefix) -> False when prefix is set.
         self.assertFalse(self.fetcher._row_passes_filter({}))
+
+    def test_row_passes_filter_custom_prefix(self) -> None:
+        """Test _row_passes_filter respects sourcing_url_prefix config."""
+        Args._config["sourcing_url_prefix"] = "https://data.cms.gov/"
+        row = {"Claimed (add your name)": "", "Download Location": "", "URL": "https://data.cms.gov/dataset/x"}
+        self.assertTrue(self.fetcher._row_passes_filter(row))
+        row_wrong = {"Claimed (add your name)": "", "Download Location": "", "URL": "https://catalog.data.gov/dataset/x"}
+        self.assertFalse(self.fetcher._row_passes_filter(row_wrong))
+        Args._config["sourcing_url_prefix"] = "https://catalog.data.gov/"
+
+    def test_row_passes_filter_empty_prefix_allows_any_url(self) -> None:
+        """Test _row_passes_filter with empty sourcing_url_prefix accepts any URL."""
+        Args._config["sourcing_url_prefix"] = ""
+        row = {"Claimed (add your name)": "", "Download Location": "", "URL": "https://example.com/dataset"}
+        self.assertTrue(self.fetcher._row_passes_filter(row))
+        Args._config["sourcing_url_prefix"] = "https://catalog.data.gov/"
 
     def test_get_candidate_urls_requires_google_sheet_id(self) -> None:
         """Test get_candidate_urls raises ValueError when google_sheet_id is missing."""
@@ -173,6 +190,74 @@ class TestSpreadsheetCandidateFetcher(unittest.TestCase):
         rows, _ = self.fetcher.get_candidate_urls(limit=None)
         self.assertEqual(len(rows), 3)
         self.assertEqual([r["url"] for r in rows], ["https://catalog.data.gov/dataset/a", "https://catalog.data.gov/dataset/d", "https://catalog.data.gov/dataset/e"])
+
+    def test_row_passes_filter_mode_completed_download_location_filled(self) -> None:
+        """Test _row_passes_filter returns True in 'completed' mode when Download Location non-empty."""
+        Args._config["sourcing_mode"] = "completed"
+        Args._config["sourcing_url_prefix"] = ""
+        row = {"Claimed (add your name)": "alice", "Download Location": "/some/path", "URL": "https://example.com/x"}
+        self.assertTrue(self.fetcher._row_passes_filter(row))
+
+    def test_row_passes_filter_mode_completed_empty_download_location_excluded(self) -> None:
+        """Test _row_passes_filter returns False in 'completed' mode when Download Location is empty."""
+        Args._config["sourcing_mode"] = "completed"
+        Args._config["sourcing_url_prefix"] = ""
+        row = {"Claimed (add your name)": "", "Download Location": "", "URL": "https://example.com/x"}
+        self.assertFalse(self.fetcher._row_passes_filter(row))
+
+    def test_row_passes_filter_mode_all_includes_claimed_rows(self) -> None:
+        """Test _row_passes_filter returns True in 'all' mode regardless of Claimed/Download Location."""
+        Args._config["sourcing_mode"] = "all"
+        Args._config["sourcing_url_prefix"] = ""
+        for claimed, dl in [("alice", "/path"), ("", "/path"), ("alice", ""), ("", "")]:
+            row = {"Claimed (add your name)": claimed, "Download Location": dl, "URL": "https://example.com/x"}
+            self.assertTrue(self.fetcher._row_passes_filter(row), f"Expected True for claimed={claimed!r}, dl={dl!r}")
+
+    def test_row_passes_filter_mode_all_still_applies_url_prefix(self) -> None:
+        """Test _row_passes_filter in 'all' mode still filters by sourcing_url_prefix."""
+        Args._config["sourcing_mode"] = "all"
+        Args._config["sourcing_url_prefix"] = "https://catalog.data.gov/"
+        row_match = {"Claimed (add your name)": "alice", "Download Location": "/path", "URL": "https://catalog.data.gov/dataset/x"}
+        row_no_match = {"Claimed (add your name)": "alice", "Download Location": "/path", "URL": "https://other.gov/dataset/x"}
+        self.assertTrue(self.fetcher._row_passes_filter(row_match))
+        self.assertFalse(self.fetcher._row_passes_filter(row_no_match))
+
+    def test_row_passes_filter_unknown_mode_defaults_to_unclaimed(self) -> None:
+        """Test _row_passes_filter with unknown mode falls back to 'unclaimed' behavior."""
+        Args._config["sourcing_mode"] = "bogus"
+        Args._config["sourcing_url_prefix"] = ""
+        row_unclaimed = {"Claimed (add your name)": "", "Download Location": "", "URL": "https://example.com/x"}
+        row_claimed = {"Claimed (add your name)": "alice", "Download Location": "", "URL": "https://example.com/x"}
+        self.assertTrue(self.fetcher._row_passes_filter(row_unclaimed))
+        self.assertFalse(self.fetcher._row_passes_filter(row_claimed))
+
+    @patch("sourcing.SpreadsheetCandidateFetcher.get_gid_for_sheet_name", return_value="0")
+    @patch.object(SpreadsheetCandidateFetcher, "_fetch_sheet_csv")
+    def test_get_candidate_urls_mode_completed_returns_completed_rows(self, mock_fetch: object, _mock_gid: object) -> None:
+        """Test get_candidate_urls in 'completed' mode returns only rows with Download Location filled."""
+        Args._config["sourcing_mode"] = "completed"
+        Args._config["sourcing_url_prefix"] = ""
+        mock_fetch.return_value = _csv_candidates()
+        rows, _ = self.fetcher.get_candidate_urls()
+        # Only dataset/c has Download Location filled
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["url"], "https://catalog.data.gov/dataset/c")
+
+    @patch("sourcing.SpreadsheetCandidateFetcher.get_gid_for_sheet_name", return_value="0")
+    @patch.object(SpreadsheetCandidateFetcher, "_fetch_sheet_csv")
+    def test_get_candidate_urls_mode_all_returns_all_rows_with_url(self, mock_fetch: object, _mock_gid: object) -> None:
+        """Test get_candidate_urls in 'all' mode returns all rows that have a non-empty URL."""
+        Args._config["sourcing_mode"] = "all"
+        Args._config["sourcing_url_prefix"] = ""
+        mock_fetch.return_value = _csv_candidates()
+        rows, _ = self.fetcher.get_candidate_urls()
+        # a, b, c, d all have URLs; last row has empty URL
+        urls = [r["url"] for r in rows]
+        self.assertIn("https://catalog.data.gov/dataset/a", urls)
+        self.assertIn("https://catalog.data.gov/dataset/b", urls)
+        self.assertIn("https://catalog.data.gov/dataset/c", urls)
+        self.assertIn("https://catalog.data.gov/dataset/d", urls)
+        self.assertEqual(len(rows), 4)
 
     @patch("sourcing.SpreadsheetCandidateFetcher.get_gid_for_sheet_name", return_value="0")
     @patch.object(SpreadsheetCandidateFetcher, "_fetch_sheet_csv")

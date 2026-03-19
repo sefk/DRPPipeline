@@ -108,7 +108,7 @@ class TestOrchestrator(unittest.TestCase):
         """Test run("catalog_collector") calls record_error when run() raises, and continues."""
         sys.argv = ["test", "noop"]
         Args._initialized = False
-        Args.initialize()
+        Args.initialize(config_file=Path("/tmp/nonexistent_drp_test_config.json"))
 
         mock_storage = MagicMock()
         mock_storage.list_eligible_projects.return_value = [

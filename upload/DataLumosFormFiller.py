@@ -238,7 +238,18 @@ class DataLumosFormFiller:
         save_btn.wait_for(state="visible", timeout=50000)
         self.wait_for_obscuring_elements()
         save_btn.click()
-    
+        self.wait_for_obscuring_elements()
+
+        # The time period modal (React-managed) intercepts pointer events on subsequent
+        # fields if it stays open. Press Escape to dismiss it, then wait for the fade-out
+        # animation to complete before returning.
+        self._page.keyboard.press("Escape")
+        try:
+            self._page.locator(".modal.fade.in").wait_for(state="hidden", timeout=10000)
+        except PlaywrightTimeoutError:
+            Logger.warning("Time period modal still visible after Escape; continuing anyway")
+            self._page.wait_for_timeout(1000)
+
     def fill_data_types(self, data_type: str) -> None:
         """
         Fill the data types field by selecting the checklist option.

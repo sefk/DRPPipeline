@@ -92,21 +92,35 @@ class SpreadsheetCandidateFetcher:
 
     def _row_passes_filter(self, row: dict[str, str]) -> bool:
         """
-        Return True if the row meets the desired criteria.
+        Return True if the row meets the desired criteria based on sourcing_mode.
 
-        Keeps rows where Claimed (add your name) and Download Location are empty.
-        
+        sourcing_mode controls which rows are selected:
+          unclaimed  (default): Claimed="" and Download Location="" (available, unworked rows)
+          completed:            Download Location is non-empty (manually archived rows)
+          all:                  any row with a non-empty URL
+
+        URL must also start with sourcing_url_prefix (if set).
+
         Note: This method assumes required columns are present (validated in
         _extract_urls_from_csv). Missing columns would indicate a bug.
         """
+        url_prefix = (getattr(Args, "sourcing_url_prefix", None) or "").strip()
         claimed = (row.get("Claimed (add your name)") or "").strip()
         download_location = (row.get("Download Location") or "").strip()
         url = (row.get("URL") or "").strip()
-        return (
-            claimed == ""
-            and download_location == ""
-            and url.startswith("https://catalog.data.gov/")
-        )
+        mode = (getattr(Args, "sourcing_mode", None) or "unclaimed").strip().lower()
+
+        if mode == "unclaimed":
+            passes = claimed == "" and download_location == ""
+        elif mode == "completed":
+            passes = download_location != ""
+        elif mode == "all":
+            passes = True
+        else:
+            Logger.warning(f"Unknown sourcing_mode '{mode}', defaulting to 'unclaimed'")
+            passes = claimed == "" and download_location == ""
+
+        return passes and (not url_prefix or url.startswith(url_prefix))
 
     def _extract_urls_from_csv(
         self, csv_text: str, url_column: str, num_rows: int | None = None
