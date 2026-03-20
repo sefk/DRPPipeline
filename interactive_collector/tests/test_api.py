@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from interactive_collector.app import app
 from interactive_collector.api_scoreboard import add_to_scoreboard, clear_scoreboard
+from pipeline_chat.schemas import ChatQueryResponse
 
 
 class TestApiProjects(unittest.TestCase):
@@ -398,3 +399,111 @@ class TestApiPipeline(unittest.TestCase):
             mock_popen.assert_called_once()
             call_args = mock_popen.call_args[0][0]
             self.assertIn("noop", call_args)
+
+
+class TestApiChat(unittest.TestCase):
+    """Tests for /api/chat/* endpoints."""
+
+    def setUp(self) -> None:
+        self.client = app.test_client()
+
+    def test_chat_query_requires_message(self) -> None:
+        """POST /api/chat/query without message returns 400."""
+        resp = self.client.post(
+            "/api/chat/query",
+            json={},
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = json.loads(resp.data)
+        self.assertEqual(data.get("ok"), False)
+        self.assertIn("error", data)
+
+    def test_chat_query_rejects_overlong_message(self) -> None:
+        """POST /api/chat/query rejects message above guardrail length."""
+        resp = self.client.post(
+            "/api/chat/query",
+            json={"message": "x" * 5001},
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = json.loads(resp.data)
+        self.assertEqual(data.get("ok"), False)
+        self.assertIn("too long", str(data.get("error", "")))
+
+    def test_chat_query_success(self) -> None:
+        """POST /api/chat/query returns tool output on successful query."""
+        with patch(
+            "interactive_collector.api_chat.run_chat_query",
+            return_value=ChatQueryResponse(
+                ok=True,
+                requires_confirmation=False,
+                tool_name="get_pipeline_stats",
+                arguments={},
+                result="Database: data_cms_gov.db",
+            ),
+        ):
+            resp = self.client.post(
+                "/api/chat/query",
+                json={"message": "database status"},
+                content_type="application/json",
+            )
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertEqual(data.get("ok"), True)
+        self.assertEqual(data.get("tool_name"), "get_pipeline_stats")
+        self.assertIn("Database:", data.get("result", ""))
+
+    def test_chat_query_error_response(self) -> None:
+        """POST /api/chat/query returns 400 when query cannot map to a tool."""
+        with patch(
+            "interactive_collector.api_chat.run_chat_query",
+            return_value=ChatQueryResponse(
+                ok=False,
+                requires_confirmation=False,
+                error="I could not map that request to a tool yet.",
+            ),
+        ):
+            resp = self.client.post(
+                "/api/chat/query",
+                json={"message": "some unsupported request"},
+                content_type="application/json",
+            )
+        self.assertEqual(resp.status_code, 400)
+        data = json.loads(resp.data)
+        self.assertEqual(data.get("ok"), False)
+        self.assertIn("error", data)
+
+    def test_chat_confirm_requires_token(self) -> None:
+        """POST /api/chat/confirm without confirmation_token returns 400."""
+        resp = self.client.post(
+            "/api/chat/confirm",
+            json={},
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = json.loads(resp.data)
+        self.assertEqual(data.get("ok"), False)
+        self.assertIn("error", data)
+
+    def test_chat_confirm_success(self) -> None:
+        """POST /api/chat/confirm executes proposed action when token is valid."""
+        with patch(
+            "interactive_collector.api_chat.confirm_chat_action",
+            return_value=ChatQueryResponse(
+                ok=True,
+                requires_confirmation=False,
+                tool_name="run_module",
+                arguments={"module": "sourcing", "dry_run": True},
+                result="ok",
+            ),
+        ):
+            resp = self.client.post(
+                "/api/chat/confirm",
+                json={"confirmation_token": "abc123", "session_id": "s1"},
+                content_type="application/json",
+            )
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertEqual(data.get("ok"), True)
+        self.assertEqual(data.get("tool_name"), "run_module")

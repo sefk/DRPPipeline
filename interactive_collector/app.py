@@ -51,8 +51,10 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB for extension PDF uploads
 # Register API blueprints for SPA.
 from interactive_collector.api import api_bp
+from interactive_collector.api_chat import chat_bp
 from interactive_collector.api_pipeline import pipeline_bp
 app.register_blueprint(api_bp)
+app.register_blueprint(chat_bp)
 app.register_blueprint(pipeline_bp)
 
 

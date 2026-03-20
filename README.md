@@ -116,8 +116,9 @@ The interactive collector allows the user to freely navigatge among source pages
 
 ### SPA Implementation
 
-- **Backend:** `interactive_collector/api.py` — Blueprint with `/api/projects/*`, `/api/projects/load`, `/api/scoreboard`, `/api/save`, `/api/download-file`, `/api/pipeline/*`, `/api/proxy`, `/api/extension/save-pdf`, `/api/metadata-from-page`, `/api/downloads-watcher/*`.
+- **Backend:** `interactive_collector/api.py` — Blueprint with `/api/projects/*`, `/api/projects/load`, `/api/scoreboard`, `/api/save`, `/api/download-file`, `/api/pipeline/*`, `/api/proxy`, `/api/extension/save-pdf`, `/api/metadata-from-page`, `/api/downloads-watcher/*`, plus `/api/chat/query` and `/api/chat/confirm` for pipeline chat.
 - **Frontend:** `interactive_collector/frontend/` — Vite + React + Zustand. Link clicks are intercepted via postMessage; pages load via API and update the Linked pane without reload.
+- **Pipeline chat orchestration:** top-level `pipeline_chat/` package handles planner, allowlisted execution, confirmation tokens, and audit logging. Mutating actions are proposal-first and require explicit confirmation before execution.
 
 ### Chrome extension
 

@@ -422,6 +422,22 @@ To run a given module, e.g., sourcing, upload, publisher, just press the corresp
 `Log level` - Display log messages with this severity or higher.
 `Max Workers` - Use multithreaded executors to speed things up.
 
+### Pipeline chat (main page)
+
+The SPA main page includes a **Pipeline Chat** panel that maps natural-language
+requests to MCP 1 tools through the backend.
+
+- Read-only tools execute immediately.
+- Mutating tools return a proposal and require explicit **Confirm action**.
+- Pending confirmations are session-bound and expire automatically.
+
+Examples:
+
+- `database status`
+- `what's the next eligible project for collection`
+- `call list_projects({"status":"sourced","limit":5})`
+- `call run_module({"module":"cms_collector","dry_run":true})`
+
 
 ### Interactive collector
 

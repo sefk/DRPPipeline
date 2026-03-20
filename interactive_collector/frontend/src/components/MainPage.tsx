@@ -7,6 +7,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CollectorRightPane } from "./CollectorRightPane";
+import { PipelineChatPanel } from "./PipelineChatPanel";
 import { useCollectorStore } from "../store";
 
 const API = "/api/pipeline";
@@ -222,6 +223,7 @@ export function MainPage() {
               </button>
             ))}
           </div>
+          <PipelineChatPanel />
         </div>
         {rightPane}
       </div>
