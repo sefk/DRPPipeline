@@ -407,7 +407,7 @@ For Google Sheets setup, see [GOOGLE_SHEETS_SETUP.md](GOOGLE_SHEETS_SETUP.md).
    ```bash
    cd interactive_collector/frontend && npm run dev
    ```
-   Vite proxies `/api` to the Flask backend.
+   Vite proxies `/api` and `/extension` to the Flask backend (the extension launcher must hit Flask, not the SPA).
 
    Dev-mode on `:5000` (Flask stays the public port with hot reload):
 
