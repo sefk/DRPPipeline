@@ -430,6 +430,16 @@ For Google Sheets setup, see [GOOGLE_SHEETS_SETUP.md](GOOGLE_SHEETS_SETUP.md).
 
 To run a given module, e.g., sourcing, upload, publisher, just press the corresponding button on the main page. Output will be shown in the log window.
 
+**Stale build on `:5000`:** Flask serves the **pre-built** SPA from `interactive_collector/frontend/dist`. The pipeline log is streamed as **NDJSON** and the UI parses each line. If you change the frontend TypeScript but do not rebuild, you will see raw frames like `{"line":...}` and `{"ping":true}` in the log pane, and lines can appear “missing” because nothing is decoding them. Fix: run `cd interactive_collector/frontend && npm run build`, or use **`http://127.0.0.1:5173/`** with `npm run dev` so Vite serves the current sources (Vite proxies `/api` to Flask).
+
+**Upload, publisher, and other long runs:** With `--debug`, Flask’s stat **reloader** watches files and can restart the server while `/api/pipeline/run` is still streaming logs. The SPA then shows a network error (`net::ERR_CONNECTION_RESET`) and the log stops. Start the backend with reload disabled, for example:
+
+```bash
+flask --app .\interactive_collector\app run --debug --no-reload
+```
+
+(You can keep the interactive debugger; only automatic restarts are off.)
+
 #### Parameters
 `Start DRPID` - Begin scanning the database for the specified project and work from there. Blank means to start from the beginning.
 `Max Rows` - Only execute this many projects, then exit. Blank means no limit.

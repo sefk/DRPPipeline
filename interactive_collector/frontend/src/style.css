@@ -5,9 +5,22 @@
   background-color: #fff;
 }
 
+/* Viewport-locked shell: only inner panes scroll, not the document. */
+html {
+  height: 100%;
+}
+
 body {
   margin: 0;
-  min-height: 100vh;
+  height: 100%;
+  overflow: hidden;
+}
+
+#app {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .app-shell {
@@ -554,12 +567,15 @@ body {
 
 /* Main page (pipeline launcher) */
 .main-page {
+  flex: 1;
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .main-page-header {
+  flex-shrink: 0;
   padding: 8px 12px;
   background: #2c3e50;
   color: #ecf0f1;
@@ -650,6 +666,7 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   border: 1px solid #ccc;
   border-radius: 4px;
   overflow: hidden;
@@ -681,6 +698,7 @@ body {
 
 .main-page-log-pre {
   flex: 1;
+  min-height: 0; /* allow flex child to shrink so overflow:auto scrolls inside the pane */
   margin: 0;
   padding: 8px;
   overflow: auto;
@@ -711,6 +729,7 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   border: 1px solid #ccc;
   border-radius: 4px;
   overflow: hidden;

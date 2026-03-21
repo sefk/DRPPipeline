@@ -110,7 +110,7 @@ The interactive collector allows the user to freely navigatge among source pages
 
 ### Running the SPA
 
-1. **Backend:** `flask run`.
+1. **Backend:** `flask run`. For **long pipeline runs from the main page** (e.g. upload, publisher) with `flask run --debug`, use **`--no-reload`** so the dev reloader does not restart mid-stream (`net::ERR_CONNECTION_RESET` in the browser). See [Usage § SPA](docs/Usage.md#3-spa-usage).
 2. **Frontend (dev):** `cd interactive_collector/frontend && npm run dev` — Vite proxies `/api` to Flask.
 3. **Production:** Build with `npm run build`, then Flask serves the built app at `/collector/`.
 

@@ -2,10 +2,17 @@
 Flask API for running pipeline modules from the SPA main page.
 
 Exposes: list modules, run a module (subprocess with streamed log output), stop running module.
-Progress is streamed to the client and echoed to stderr so it appears in the Flask terminal.
-Sends a keepalive comment when the subprocess is silent so proxies/browsers don't close the connection.
+Progress is streamed to the client as NDJSON (application/x-ndjson): one JSON object per line,
+``{"line": "..."}`` for log text (including trailing newlines) and ``{"ping": true}`` for
+keepalives that do not appear in the log. Stderr still receives raw log lines only (no pings),
+so the Flask terminal matches the SPA without blank keepalive lines.
+
+Subprocess stdout is read as binary with an incremental UTF-8 decoder so Windows pipes do not
+drop or merge lines the way text-mode iteration can.
 """
 
+import codecs
+import json
 import os
 import queue
 import subprocess
@@ -14,7 +21,7 @@ import threading
 from pathlib import Path
 from typing import Any, Generator, Optional
 
-from flask import Blueprint, Response, current_app, request
+from flask import Blueprint, Response, current_app, request, stream_with_context
 
 # Project root (parent of interactive_collector)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -25,6 +32,16 @@ _STOP_FILE = _PROJECT_ROOT / ".drp_pipeline_stop"
 _current_proc: Optional[subprocess.Popen[str]] = None
 
 pipeline_bp = Blueprint("pipeline", __name__, url_prefix="/api/pipeline")
+
+
+def _ndjson_line(obj: Any) -> str:
+    """Single NDJSON record (UTF-8 text, trailing newline)."""
+    return json.dumps(obj, ensure_ascii=False) + "\n"
+
+
+def _normalize_log_line(s: str) -> str:
+    """Normalize Windows CRLF from subprocess pipes to single \\n for NDJSON and stderr."""
+    return s.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _modules() -> dict[str, dict[str, Any]]:
@@ -68,7 +85,7 @@ def run_module() -> Any:
     log_level (optional), max_workers (optional).
 
     Returns:
-        Streamed text/plain (log output). On invalid input, 400 JSON.
+        Streamed ``application/x-ndjson`` (one JSON object per line). On invalid input, 400 JSON.
 
     Note: If you don't see [pipeline/run] logs in the terminal, the debug reloader
     may be using a child process whose output isn't shown. Try: flask run --no-reload
@@ -118,17 +135,23 @@ def run_module() -> Any:
 
     def stream() -> Generator[str, None, None]:
         global _current_proc
-        proc: Optional[subprocess.Popen[str]] = None
-        keepalive_interval = 20.0  # Send something every N seconds so connection isn't dropped
+        proc: Optional[subprocess.Popen[bytes]] = None
+        keepalive_interval = 10.0  # Send something every N seconds (proxies / idle TCP)
         # Emit these as the first chunk so they appear in the stream (SPA + terminal)
         start_msg1 = f"[pipeline/run] POST received module={module!r}\n"
         start_msg2 = f"[pipeline/run] starting subprocess: {' '.join(argv)}\n"
         sys.stderr.write(start_msg1)
         sys.stderr.flush()
-        yield start_msg1
+        try:
+            yield _ndjson_line({"line": start_msg1})
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
         sys.stderr.write(start_msg2)
         sys.stderr.flush()
-        yield start_msg2
+        try:
+            yield _ndjson_line({"line": start_msg2})
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
         try:
             try:
                 if _STOP_FILE.exists():
@@ -143,10 +166,7 @@ def run_module() -> Any:
                 cwd=str(_PROJECT_ROOT),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
+                bufsize=0,
                 env=env,
             )
             _current_proc = proc
@@ -155,9 +175,27 @@ def run_module() -> Any:
             sentinel: Optional[str] = None
 
             def reader() -> None:
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                remainder = ""
                 try:
-                    for line in proc.stdout:
-                        out_queue.put(line)
+                    while True:
+                        raw = proc.stdout.read(8192)
+                        if raw == b"":
+                            break
+                        remainder += decoder.decode(raw)
+                        while "\n" in remainder:
+                            idx = remainder.index("\n")
+                            line = _normalize_log_line(remainder[: idx + 1])
+                            remainder = remainder[idx + 1 :]
+                            out_queue.put(line)
+                    remainder += decoder.decode(b"", final=True)
+                    if remainder:
+                        tail = (
+                            remainder
+                            if remainder.endswith("\n")
+                            else remainder + "\n"
+                        )
+                        out_queue.put(_normalize_log_line(tail))
                 except Exception:
                     pass
                 out_queue.put(sentinel)
@@ -168,22 +206,28 @@ def run_module() -> Any:
                 try:
                     line = out_queue.get(timeout=keepalive_interval)
                 except queue.Empty:
-                    line = "\n"
-                    sys.stderr.write(line)
-                    sys.stderr.flush()
-                    yield line
+                    try:
+                        yield _ndjson_line({"ping": True})
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        break
                     continue
                 if line is None:
                     break
                 sys.stderr.write(line)
                 sys.stderr.flush()
-                yield line
+                try:
+                    yield _ndjson_line({"line": line})
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    break
             proc.wait()
         except Exception as e:
             line = f"\nPipeline run error: {e}\n"
             sys.stderr.write(line)
             sys.stderr.flush()
-            yield line
+            try:
+                yield _ndjson_line({"line": line})
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
         finally:
             _current_proc = None
             if _STOP_FILE.exists():
@@ -195,8 +239,8 @@ def run_module() -> Any:
                 proc.terminate()
 
     return Response(
-        stream(),
-        mimetype="text/plain; charset=utf-8",
+        stream_with_context(stream()),
+        mimetype="application/x-ndjson; charset=utf-8",
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
     )
 

@@ -17,6 +17,20 @@ def _is_empty(value: Optional[str]) -> bool:
     return not value or value.strip() == ""
 
 
+def _debug_form_field(name: str, value: Optional[str] = None, *, n_chars: Optional[int] = None) -> None:
+    """Log a single form field at DEBUG as it is filled (value may be long HTML)."""
+    if n_chars is not None:
+        Logger.debug(f"Upload form field {name}: {n_chars} character(s)")
+        return
+    if value is None:
+        Logger.debug(f"Upload form field {name}: (none)")
+        return
+    preview = value.replace("\n", " ").strip()
+    if len(preview) > 140:
+        preview = preview[:140] + "…"
+    Logger.debug(f"Upload form field {name}: {preview!r}")
+
+
 class DataLumosFormFiller:
     """
     Fills form fields on the DataLumos project page.
@@ -77,6 +91,7 @@ class DataLumosFormFiller:
         Args:
             title: Project title text
         """
+        _debug_form_field("title", title)
         title_input = self._page.locator("#title")
         title_input.fill(title)
         
@@ -113,6 +128,7 @@ class DataLumosFormFiller:
             value = value.strip()
             if value == 'CDC':
                 value = 'United States Department of Health and Human Services. Centers for Disease Control and Prevention'
+            _debug_form_field("agency_or_office", value)
             add_btn = self._page.locator(add_value_selector)
             self.wait_for_obscuring_elements()
             add_btn.click()
@@ -159,6 +175,7 @@ class DataLumosFormFiller:
         """Fill the summary/description field (WYSIWYG). Preserves HTML markup."""
         if _is_empty(summary):
             return
+        _debug_form_field("summary (dcterms_description)", n_chars=len(summary))
         self._fill_wysiwyg(
             "#edit-dcterms_description_0",
             summary,
@@ -170,6 +187,7 @@ class DataLumosFormFiller:
         """Fill the original distribution URL field."""
         if _is_empty(url):
             return
+        _debug_form_field("original_distribution_url (imeta_sourceURL)", url)
         self._fill_editable_inline(
             "#edit-imeta_sourceURL_0 > span:nth-child(1) > span:nth-child(2)",
             url,
@@ -189,6 +207,7 @@ class DataLumosFormFiller:
             
             try:
                 self.wait_for_obscuring_elements()
+                _debug_form_field("keyword (subject term)", keyword)
                 search_field = self._page.locator(".select2-search__field")
                 search_field.click()
                 search_field.fill(keyword)
@@ -206,6 +225,7 @@ class DataLumosFormFiller:
         """Fill the geographic coverage field."""
         if _is_empty(coverage):
             return
+        _debug_form_field("geographic_coverage (dcterms_location)", coverage)
         self._fill_editable_inline(
             "#edit-dcterms_location_0 > span:nth-child(1) > span:nth-child(2)",
             coverage,
@@ -215,7 +235,9 @@ class DataLumosFormFiller:
         """Fill the time period fields."""
         if _is_empty(start) and _is_empty(end):
             return
-        
+
+        _debug_form_field("time_period", f"start={start!r} end={end!r}")
+
         add_btn = self._page.locator(
             "#groupAttr1 > div:nth-child(1) > div:nth-child(3) > div:nth-child(1) > "
             "a:nth-child(3) > span:nth-child(3)"
@@ -259,7 +281,9 @@ class DataLumosFormFiller:
         """
         if _is_empty(data_type):
             return
-        
+
+        _debug_form_field("data_types (kindOfData)", data_type)
+
         edit_btn = self._page.locator("#disco_kindOfData_0 > span:nth-child(2)")
         self.wait_for_obscuring_elements()
         edit_btn.click()
@@ -285,6 +309,9 @@ class DataLumosFormFiller:
             combined = download_part
         else:
             return
+
+        _debug_form_field("collection_notes (imeta_collectionNotes)", n_chars=len(combined))
+
         self._fill_wysiwyg(
             "#edit-imeta_collectionNotes_0",
             combined,

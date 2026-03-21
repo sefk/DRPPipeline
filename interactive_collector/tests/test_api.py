@@ -377,11 +377,18 @@ class TestApiPipeline(unittest.TestCase):
         self.assertEqual(data.get("ok"), True)
 
     def test_pipeline_run_noop_streams_output(self) -> None:
-        """POST /api/pipeline/run with noop streams log output."""
+        """POST /api/pipeline/run with noop streams NDJSON log frames."""
         proc = unittest.mock.MagicMock()
-        proc.stdout = iter(
-            ["2025-01-01 12:00:00 - INFO - DRP Pipeline starting...\n", "Done\n"]
-        )
+        _reads = [
+            b"2025-01-01 12:00:00 - INFO - DRP Pipeline starting...\n",
+            b"Done\n",
+            b"",
+        ]
+
+        def _read(_n: int = 8192) -> bytes:
+            return _reads.pop(0) if _reads else b""
+
+        proc.stdout.read = _read
         proc.poll.return_value = 0
         proc.wait.return_value = 0
         with patch(
@@ -396,6 +403,7 @@ class TestApiPipeline(unittest.TestCase):
             self.assertEqual(resp.status_code, 200)
             body = resp.data.decode("utf-8")
             self.assertIn("DRP Pipeline", body)
+            self.assertIn('"line"', body)
             mock_popen.assert_called_once()
             call_args = mock_popen.call_args[0][0]
             self.assertIn("noop", call_args)
