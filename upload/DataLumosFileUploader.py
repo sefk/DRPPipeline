@@ -12,6 +12,7 @@ the Import From Zip feature instead of uploading files one-by-one.
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import List
 
@@ -26,7 +27,11 @@ IMPORT_FROM_ZIP_BTN_SELECTOR = 'a.btn-default:has-text("Import From Zip")'
 DROP_ZONE_SELECTOR = ".importFileModal .col-md-offset-2 > span:nth-child(1)"
 DROP_ZONE_SELECTOR_FROM_ZIP = ".importZipModal .col-md-offset-2 > span:nth-child(1)"
 FILE_QUEUED_TEXT = "File added to queue for upload."
+# Substring for counting matches inside a single legend / status block (text may omit trailing ".")
+FILE_QUEUED_PHRASE = "File added to queue for upload"
 FILE_QUEUED_TEXT_FROM_ZIP = "The contents of your ZIP file are being extracted"
+# Zip UI may shorten the message; this substring should stay stable.
+ZIP_STATUS_SUBSTRING = "being extracted"
 CLOSE_MODAL_SELECTOR = ".importFileModal .modal-footer button"
 CLOSE_MODAL_SELECTOR_FROM_ZIP = ".importZipModal .modal-footer button"
 INJECTED_INPUT_ID = "pw-datalumos-file-input"
@@ -174,16 +179,14 @@ class DataLumosFileUploader:
 
         file_input = self._page.locator(f"#{input_id}")
         try:
-            for path in paths:
+            for idx, path in enumerate(paths):
                 file_input.set_input_files(str(path))
-                self._page.wait_for_timeout(500)
                 if use_zip:
-                    # press the Upload button
                     upload_btn = self._page.locator("#uploadButton")
                     upload_btn.click()
                     self.wait_for_zip_upload_completion()
-            if not use_zip:
-                self.wait_for_upload_completion(len(paths))
+                else:
+                    self._wait_until_queued_count(use_zip=False, expected=idx + 1)
         except Exception as e:
             self._remove_injected_input()
             raise RuntimeError(f"Error uploading '{paths[0].name if paths else '?'}': {e}") from e
@@ -237,12 +240,64 @@ class DataLumosFileUploader:
         Logger.debug(f"Found {len(files)} files in {folder_path}")
         return files
 
+    def _upload_modal_selector(self, use_zip: bool) -> str:
+        return ".importZipModal" if use_zip else ".importFileModal"
+
+    def _queued_completion_signal_count(self, use_zip: bool) -> int:
+        """
+        Count how many per-file completion signals appear in the modal.
+
+        DataLumos may render status in a <legend>, <span>, or other nodes — not only span.
+        Sometimes one status region repeats the phrase; use max(element matches, substring count).
+        """
+        modal = self._page.locator(self._upload_modal_selector(use_zip))
+        if use_zip:
+            phrase = FILE_QUEUED_TEXT_FROM_ZIP
+            substr = ZIP_STATUS_SUBSTRING
+        else:
+            phrase = FILE_QUEUED_PHRASE
+            substr = FILE_QUEUED_PHRASE
+        n_elem = 0
+        try:
+            n_elem = modal.get_by_text(phrase, exact=False).count()
+        except Exception:
+            pass
+        n_text = 0
+        try:
+            txt = modal.inner_text(timeout=5000)
+            n_text = txt.count(substr)
+        except PlaywrightTimeoutError:
+            pass
+        except Exception:
+            pass
+        return max(n_elem, n_text)
+
+    def _wait_until_queued_count(self, use_zip: bool, expected: int) -> None:
+        if expected <= 0:
+            return
+        modal_sel = self._upload_modal_selector(use_zip)
+        label = FILE_QUEUED_TEXT_FROM_ZIP if use_zip else FILE_QUEUED_PHRASE
+        deadline = time.monotonic() + self._upload_wait_timeout / 1000.0
+        while time.monotonic() < deadline:
+            self._wait_for_obscuring_elements()
+            n = self._queued_completion_signal_count(use_zip)
+            if n >= expected:
+                Logger.debug(
+                    f"Upload modal {modal_sel}: {n} completion signal(s) (target {expected})"
+                )
+                return
+            self._page.wait_for_timeout(400)
+        raise TimeoutError(
+            f"Upload did not reach {expected} completion signal(s) within {self._upload_wait_timeout} ms "
+            f"({label!r} in {modal_sel})"
+        )
+
     def wait_for_upload_completion(self, file_count: int) -> None:
         """
         Wait for all file uploads to be queued.
 
-        Waits until the text "File added to queue for upload." appears
-        at least file_count times (or timeout).
+        Looks for "File added to queue for upload" in the import modal (any element,
+        including legend), polling until the signal count reaches file_count.
 
         Args:
             file_count: Number of files being uploaded
@@ -250,30 +305,15 @@ class DataLumosFileUploader:
         Raises:
             TimeoutError: If uploads don't complete within upload_wait_timeout
         """
-        if file_count <= 0:
-            return
-        queued = self._page.locator(f"span:has-text('{FILE_QUEUED_TEXT}')")
-        try:
-            queued.nth(file_count - 1).wait_for(state="visible", timeout=self._upload_wait_timeout)
-        except PlaywrightTimeoutError as e:
-            raise TimeoutError(
-                f"File upload did not complete within {self._upload_wait_timeout} ms "
-                f"(expected {file_count} 'File added to queue for upload.' messages)"
-            ) from e
+        self._wait_until_queued_count(use_zip=False, expected=file_count)
         Logger.debug(f"All {file_count} file(s) added to queue")
 
     def wait_for_zip_upload_completion(self) -> None:
         """
-        Wait for the zip file uploads to be queued.
+        Wait for the zip import to show completion / extraction status in the zip modal.
 
         Raises:
             TimeoutError: If uploads don't complete within upload_wait_timeout
         """
-        queued = self._page.locator(f"span:has-text('{FILE_QUEUED_TEXT_FROM_ZIP}')")
-        try:
-            queued.nth(0).wait_for(state="visible", timeout=self._upload_wait_timeout)
-        except PlaywrightTimeoutError as e:
-            raise TimeoutError(
-                f"File upload did not complete within {self._upload_wait_timeout} ms "
-            ) from e
-        Logger.debug(f"Zip file(s) added to queue")        
+        self._wait_until_queued_count(use_zip=True, expected=1)
+        Logger.debug("Zip file(s) added to queue")

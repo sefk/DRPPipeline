@@ -509,6 +509,12 @@ python main.py publisher
 python main.py cleanup_inprogress --log-color
 ```
 
+**Claimed-by-name across all tabs:** Tallies non-empty cells in columns whose header in **row 1 or row 2** includes the whole word `claimed` (case-insensitive; not `unclaimed` / `disclaimed`). Also prints, per worksheet, how many rows have a non-empty **URL** column (`sourcing_url_column`, default `URL`) while every claimed header column is empty; lists tabs that have claimed columns but no exact URL header match. Then totals, unique claimants, worksheets with no claimed header, and per-name counts sorted descending. Downloads the spreadsheet once as XLSX using `google_sheet_id` and `google_credentials`:
+
+```bash
+python debug/tally_claimed_all_tabs.py
+```
+
 **Workflow order:** sourcing → socrata_collector / catalog_collector / cms_collector / interactive_collector → upload → publisher. Optional: cleanup_inprogress for stuck DataLumos projects.
 
 ### Modules

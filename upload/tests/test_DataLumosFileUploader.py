@@ -132,6 +132,10 @@ class TestDataLumosFileUploader(unittest.TestCase):
                     loc.wait_for = MagicMock()
                     loc.click = MagicMock()
                     loc.nth = MagicMock(return_value=MagicMock())
+                    gbt = MagicMock()
+                    gbt.count.return_value = 1
+                    loc.get_by_text = MagicMock(return_value=gbt)
+                    loc.inner_text = MagicMock(return_value="")
                 return loc
 
             mock_page = MagicMock()
