@@ -99,7 +99,9 @@ class GoogleSheetUpdater:
                 str(credentials_path),
                 scopes=["https://www.googleapis.com/auth/spreadsheets"],
             )
-            service = build("sheets", "v4", credentials=credentials)
+            # cache_discovery=False avoids "file_cache is only supported with oauth2client<4.0.0"
+            # (google-auth does not use oauth2client's file cache for discovery documents).
+            service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
             column_map = self._get_column_mapping(
                 service, sheet_id, sheet_name, required_columns, optional_columns

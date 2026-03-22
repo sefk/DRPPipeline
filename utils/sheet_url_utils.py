@@ -41,7 +41,7 @@ def get_gid_for_sheet_name(
             str(credentials_path),
             scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
         )
-        service = build("sheets", "v4", credentials=creds)
+        service = build("sheets", "v4", credentials=creds, cache_discovery=False)
         meta = (
             service.spreadsheets()
             .get(

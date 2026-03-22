@@ -5,9 +5,22 @@
   background-color: #fff;
 }
 
+/* Viewport-locked shell: only inner panes scroll, not the document. */
+html {
+  height: 100%;
+}
+
 body {
   margin: 0;
-  min-height: 100vh;
+  height: 100%;
+  overflow: hidden;
+}
+
+#app {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .app-shell {
@@ -554,12 +567,15 @@ body {
 
 /* Main page (pipeline launcher) */
 .main-page {
+  flex: 1;
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .main-page-header {
+  flex-shrink: 0;
   padding: 8px 12px;
   background: #2c3e50;
   color: #ecf0f1;
@@ -650,6 +666,7 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   border: 1px solid #ccc;
   border-radius: 4px;
   overflow: hidden;
@@ -681,6 +698,7 @@ body {
 
 .main-page-log-pre {
   flex: 1;
+  min-height: 0; /* allow flex child to shrink so overflow:auto scrolls inside the pane */
   margin: 0;
   padding: 8px;
   overflow: auto;
@@ -711,6 +729,7 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   border: 1px solid #ccc;
   border-radius: 4px;
   overflow: hidden;
@@ -824,4 +843,82 @@ body {
     opacity: 1;
     transform: translateY(0);
   }
+}
+
+.pipeline-chat {
+  margin-top: 12px;
+  border: 1px solid #cfd6df;
+  border-radius: 6px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  min-height: 220px;
+  max-height: 380px;
+}
+
+.pipeline-chat-header {
+  font-weight: 600;
+  padding: 8px 10px;
+  border-bottom: 1px solid #e1e5ea;
+  background: #f6f8fb;
+}
+
+.pipeline-chat-items {
+  padding: 8px;
+  overflow: auto;
+  flex: 1;
+}
+
+.pipeline-chat-empty {
+  color: #5c6978;
+  font-size: 13px;
+}
+
+.pipeline-chat-item {
+  padding: 8px;
+  border: 1px solid #e4e8ee;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.pipeline-chat-item-user {
+  background: #f7fbff;
+}
+
+.pipeline-chat-item-assistant {
+  background: #fafbfc;
+}
+
+.pipeline-chat-item-role {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.pipeline-chat-item-tool,
+.pipeline-chat-item-args {
+  color: #5f6d7b;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.pipeline-chat-actions {
+  margin-top: 6px;
+}
+
+.pipeline-chat-item-text {
+  white-space: pre-wrap;
+  margin-top: 2px;
+}
+
+.pipeline-chat-input-row {
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid #e1e5ea;
+}
+
+.pipeline-chat-input-row input {
+  flex: 1;
 }

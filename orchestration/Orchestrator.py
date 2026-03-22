@@ -184,7 +184,8 @@ class Orchestrator:
         # Load and instantiate module class
         module_class = _find_module_class(class_name)
         module_instance = module_class()
-        
+        Logger.debug(f"Orchestrator loaded module class={class_name!r}")
+
         if prereq is None:
             # Modules with no prereq: call run(-1) once
             module_instance.run(-1)
@@ -206,6 +207,7 @@ class Orchestrator:
                 if num_rows is not None:
                     projects = projects[:num_rows]
             else:
+                Logger.info(f"Orchestrator listing eligible projects prereq={prereq!r}")
                 projects = Storage.list_eligible_projects(prereq, num_rows, start_row, start_drpid)
             Logger.info(f"Orchestrator module={module!r} eligible projects={len(projects)}")
             max_workers = Args.max_workers or 1
@@ -218,7 +220,10 @@ class Orchestrator:
                 # Each thread gets its own module instance (and thus its own Playwright/browser)
                 instance = module_class()
                 try:
-                    Logger.info(f"Starting project with source URL {source_url}")
+                    Logger.info(
+                        f"Orchestrator starting project module={module!r} "
+                        f"DRPID={drpid} source_url={source_url!r}"
+                    )
                     instance.run(drpid)
                 except Exception as exc:
                     record_error(
@@ -226,6 +231,9 @@ class Orchestrator:
                         f"Orchestrator module={module!r} DRPID={drpid} exception: {exc}",
                     )
                 finally:
+                    Logger.info(
+                        f"Orchestrator finished project module={module!r} DRPID={drpid}"
+                    )
                     Logger.clear_current_drpid()
 
             n_projects = len(projects)
@@ -240,7 +248,10 @@ class Orchestrator:
                     source_url = proj.get("source_url", "")
                     Logger.set_current_drpid(drpid)
                     try:
-                        Logger.info(f"Starting project with source URL {source_url}")
+                        Logger.info(
+                            f"Orchestrator starting project module={module!r} "
+                            f"DRPID={drpid} ({idx}/{n_projects}) source_url={source_url!r}"
+                        )
                         module_instance.run(drpid)
                     except Exception as exc:
                         record_error(
@@ -248,6 +259,10 @@ class Orchestrator:
                             f"Orchestrator module={module!r} DRPID={drpid} exception: {exc}",
                         )
                     finally:
+                        Logger.info(
+                            f"Orchestrator finished project module={module!r} "
+                            f"DRPID={drpid} ({idx}/{n_projects})"
+                        )
                         Logger.clear_current_drpid()
             else:
                 Logger.info(f"Orchestrator running with max_workers={max_workers}")

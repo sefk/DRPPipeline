@@ -92,6 +92,11 @@ class Args(metaclass=ArgsMeta):
         "google_sheet_name": "CDC",  # Worksheet/tab name (sourcing CSV tab and publisher updates)
         "google_username": "mkraley",  # Value for "Claimed" column
         "stop_file": None,  # When set (e.g. via env DRP_STOP_FILE), orchestrator checks this path each iteration and exits if file exists
+
+        # Pipeline chat (SPA + MCP 1)
+        # Prefer config.json over env vars for credentials.
+        "pipeline_chat_openai_api_key": None,
+        "pipeline_chat_openai_model": "gpt-4o-mini",
     }
     
     _config: Dict[str, Any] = {}

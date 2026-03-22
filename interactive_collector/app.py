@@ -16,6 +16,7 @@ Save button converts checked scoreboard pages to PDF in that folder.
 import html
 import json
 import logging
+import os
 import re
 import sys
 from datetime import date, datetime
@@ -24,7 +25,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urljoin
 
 import requests
-from flask import Flask, redirect, request, render_template_string, send_from_directory, url_for
+from flask import Flask, Response, redirect, request, render_template_string, send_from_directory, url_for
 
 from interactive_collector.collector_state import get_result_by_drpid as _get_result_by_drpid
 from interactive_collector.collector_state import get_scoreboard as _get_scoreboard
@@ -51,8 +52,10 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB for extension PDF uploads
 # Register API blueprints for SPA.
 from interactive_collector.api import api_bp
+from interactive_collector.api_chat import chat_bp
 from interactive_collector.api_pipeline import pipeline_bp
 app.register_blueprint(api_bp)
+app.register_blueprint(chat_bp)
 app.register_blueprint(pipeline_bp)
 
 
@@ -1233,8 +1236,56 @@ def _prepare_pane_content(
 _FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
 
 
+_VITE_DEV_ORIGIN = os.environ.get("VITE_DEV_ORIGIN", "http://127.0.0.1:5173").rstrip("/")
+
+
+def _proxy_spa_to_vite(subpath: str) -> Response | None:
+    """
+    Dev-only proxy: forward SPA asset requests to the Vite dev server.
+
+    Goal: keep the browser URL on Flask's port (typically 5000) while still
+    using Vite for hot reload during `flask run --debug`.
+    """
+    # Only proxy in debug mode to avoid depending on a dev server in prod.
+    if not getattr(app, "debug", False):
+        return None
+
+    # Subpath is the portion after `/`; empty means `/`.
+    # Keep it safe by trimming a leading slash if provided.
+    safe_subpath = (subpath or "").lstrip("/")
+    target = f"{_VITE_DEV_ORIGIN}/" + safe_subpath
+    if not safe_subpath:
+        target = f"{_VITE_DEV_ORIGIN}/"
+    if request.query_string:
+        target = f"{target}?{request.query_string.decode('utf-8', errors='ignore')}"
+
+    try:
+        upstream = requests.get(target, timeout=5)
+    except requests.RequestException:
+        return None
+
+    # Forward most response headers, but drop hop-by-hop and encoding headers.
+    headers: dict[str, str] = {}
+    for k, v in upstream.headers.items():
+        lk = k.lower()
+        if lk in {"transfer-encoding", "content-encoding", "content-length", "connection"}:
+            continue
+        # Preserve type + cache control so Vite assets behave properly.
+        if lk in {"content-type", "cache-control", "etag", "last-modified"}:
+            headers[k] = v
+
+    content = upstream.content
+    return Response(content, status=upstream.status_code, headers=headers)
+
+
 def _serve_spa(subpath: str = "") -> Any:
     """Serve the React SPA (main page with log and collector panes)."""
+    # When Flask is running in debug mode, try to keep UI on 5000 while
+    # using Vite for HMR by proxying requests to Vite.
+    proxied = _proxy_spa_to_vite(subpath)
+    if proxied is not None:
+        return proxied
+
     dist_str = str(_FRONTEND_DIST)
     if not _FRONTEND_DIST.is_dir():
         return (

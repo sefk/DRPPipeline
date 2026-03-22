@@ -407,7 +407,21 @@ For Google Sheets setup, see [GOOGLE_SHEETS_SETUP.md](GOOGLE_SHEETS_SETUP.md).
    ```bash
    cd interactive_collector/frontend && npm run dev
    ```
-   Vite proxies `/api` to the Flask backend.
+   Vite proxies `/api` and `/extension` to the Flask backend (the extension launcher must hit Flask, not the SPA).
+
+   Dev-mode on `:5000` (Flask stays the public port with hot reload):
+
+   - Start Vite (keeps running on `:5173`):  
+     ```bash
+     cd interactive_collector/frontend && npm run dev
+     ```
+   - Start Flask in debug mode (Flask on `:5000` proxies SPA requests to Vite):
+     ```bash
+     flask --app .\interactive_collector\app run --debug
+     ```
+   - Open `http://127.0.0.1:5000/`
+
+   (If your Vite dev server is at a different origin/port, set `VITE_DEV_ORIGIN`.)
 
 3. **Production:**  
    Build with `npm run build`, then Flask serves the built app at `/collector/`.
@@ -416,11 +430,37 @@ For Google Sheets setup, see [GOOGLE_SHEETS_SETUP.md](GOOGLE_SHEETS_SETUP.md).
 
 To run a given module, e.g., sourcing, upload, publisher, just press the corresponding button on the main page. Output will be shown in the log window.
 
+**Stale build on `:5000`:** Flask serves the **pre-built** SPA from `interactive_collector/frontend/dist`. The pipeline log is streamed as **NDJSON** and the UI parses each line. If you change the frontend TypeScript but do not rebuild, you will see raw frames like `{"line":...}` and `{"ping":true}` in the log pane, and lines can appear “missing” because nothing is decoding them. Fix: run `cd interactive_collector/frontend && npm run build`, or use **`http://127.0.0.1:5173/`** with `npm run dev` so Vite serves the current sources (Vite proxies `/api` to Flask).
+
+**Upload, publisher, and other long runs:** With `--debug`, Flask’s stat **reloader** watches files and can restart the server while `/api/pipeline/run` is still streaming logs. The SPA then shows a network error (`net::ERR_CONNECTION_RESET`) and the log stops. Start the backend with reload disabled, for example:
+
+```bash
+flask --app .\interactive_collector\app run --debug --no-reload
+```
+
+(You can keep the interactive debugger; only automatic restarts are off.)
+
 #### Parameters
 `Start DRPID` - Begin scanning the database for the specified project and work from there. Blank means to start from the beginning.
 `Max Rows` - Only execute this many projects, then exit. Blank means no limit.
 `Log level` - Display log messages with this severity or higher.
 `Max Workers` - Use multithreaded executors to speed things up.
+
+### Pipeline chat (main page)
+
+The SPA main page includes a **Pipeline Chat** panel that maps natural-language
+requests to MCP 1 tools through the backend.
+
+- Read-only tools execute immediately.
+- Mutating tools return a proposal and require explicit **Confirm action**.
+- Pending confirmations are session-bound and expire automatically.
+
+Examples:
+
+- `database status`
+- `what's the next eligible project for collection`
+- `call list_projects({"status":"sourced","limit":5})`
+- `call run_module({"module":"cms_collector","dry_run":true})`
 
 
 ### Interactive collector
@@ -467,6 +507,12 @@ python main.py interactive_collector
 python main.py upload --num-rows 5
 python main.py publisher
 python main.py cleanup_inprogress --log-color
+```
+
+**Claimed-by-name across all tabs:** Tallies non-empty cells in columns whose header in **row 1 or row 2** includes the whole word `claimed` (case-insensitive; not `unclaimed` / `disclaimed`). Also prints, per worksheet, how many rows have a non-empty **URL** column (`sourcing_url_column`, default `URL`) while every claimed header column is empty; lists tabs that have claimed columns but no exact URL header match. Then totals, unique claimants, worksheets with no claimed header, and per-name counts sorted descending. Downloads the spreadsheet once as XLSX using `google_sheet_id` and `google_credentials`:
+
+```bash
+python debug/tally_claimed_all_tabs.py
 ```
 
 **Workflow order:** sourcing → socrata_collector / catalog_collector / cms_collector / interactive_collector → upload → publisher. Optional: cleanup_inprogress for stuck DataLumos projects.

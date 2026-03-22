@@ -110,14 +110,15 @@ The interactive collector allows the user to freely navigatge among source pages
 
 ### Running the SPA
 
-1. **Backend:** `flask run`.
+1. **Backend:** `flask run`. For **long pipeline runs from the main page** (e.g. upload, publisher) with `flask run --debug`, use **`--no-reload`** so the dev reloader does not restart mid-stream (`net::ERR_CONNECTION_RESET` in the browser). See [Usage § SPA](docs/Usage.md#3-spa-usage).
 2. **Frontend (dev):** `cd interactive_collector/frontend && npm run dev` — Vite proxies `/api` to Flask.
 3. **Production:** Build with `npm run build`, then Flask serves the built app at `/collector/`.
 
 ### SPA Implementation
 
-- **Backend:** `interactive_collector/api.py` — Blueprint with `/api/projects/*`, `/api/projects/load`, `/api/scoreboard`, `/api/save`, `/api/download-file`, `/api/pipeline/*`, `/api/proxy`, `/api/extension/save-pdf`, `/api/metadata-from-page`, `/api/downloads-watcher/*`.
+- **Backend:** `interactive_collector/api.py` — Blueprint with `/api/projects/*`, `/api/projects/load`, `/api/scoreboard`, `/api/save`, `/api/download-file`, `/api/pipeline/*`, `/api/proxy`, `/api/extension/save-pdf`, `/api/metadata-from-page`, `/api/downloads-watcher/*`, plus `/api/chat/query` and `/api/chat/confirm` for pipeline chat.
 - **Frontend:** `interactive_collector/frontend/` — Vite + React + Zustand. Link clicks are intercepted via postMessage; pages load via API and update the Linked pane without reload.
+- **Pipeline chat orchestration:** top-level `pipeline_chat/` package handles planner, allowlisted execution, confirmation tokens, and audit logging. Mutating actions are proposal-first and require explicit confirmation before execution.
 
 ### Chrome extension
 

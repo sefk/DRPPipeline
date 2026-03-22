@@ -7,6 +7,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CollectorRightPane } from "./CollectorRightPane";
+import { PipelineChatPanel } from "./PipelineChatPanel";
 import { useCollectorStore } from "../store";
 
 const API = "/api/pipeline";
@@ -24,6 +25,8 @@ export function MainPage() {
   const [rightPaneMode, setRightPaneMode] = useState<"log" | "collector">("log");
   const logEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  /** Canonical log text; stream appends here then copies to state so chunks are never dropped by batched functional updates. */
+  const logTextRef = useRef<string>("");
 
   const { loadProject, loadFirstProject } = useCollectorStore();
 
@@ -55,7 +58,10 @@ export function MainPage() {
       setRunning(true);
       setError(null);
       abortRef.current = new AbortController();
-      setLogOutput((prev) => prev ? `${prev}\n--- Running ${module} ---\n` : `--- Running ${module} ---\n`);
+      logTextRef.current = logTextRef.current
+        ? `${logTextRef.current}\n--- Running ${module} ---\n`
+        : `--- Running ${module} ---\n`;
+      setLogOutput(logTextRef.current);
       const body: Record<string, unknown> = { module };
       const num = maxRows.trim();
       if (num) {
@@ -88,26 +94,63 @@ export function MainPage() {
         }
         const reader = res.body?.getReader();
         if (!reader) {
-          setLogOutput((prev) => prev + "\n(No response body)\n");
+          logTextRef.current += "\n(No response body)\n";
+          setLogOutput(logTextRef.current);
           setRunning(false);
           return;
         }
         const dec = new TextDecoder();
-        let acc = "";
+        /** Buffer incomplete NDJSON lines (TCP chunks can split mid-line). */
+        let ndBuf = "";
+        const appendLogText = (s: string) => {
+          logTextRef.current += s.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        };
+        const appendNdjsonChunk = (chunk: string) => {
+          ndBuf += chunk;
+          let cut: number;
+          while ((cut = ndBuf.indexOf("\n")) >= 0) {
+            const row = ndBuf.slice(0, cut).trimEnd();
+            ndBuf = ndBuf.slice(cut + 1);
+            if (!row) continue;
+            try {
+              const o = JSON.parse(row) as { line?: string; ping?: boolean };
+              if (o.ping) continue;
+              if (typeof o.line === "string") appendLogText(o.line);
+            } catch {
+              /* Plain-text fallback if a line is not valid NDJSON. */
+              appendLogText(row + "\n");
+            }
+          }
+          setLogOutput(logTextRef.current);
+        };
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          acc += dec.decode(value, { stream: true });
-          setLogOutput((prev) => prev + acc);
-          acc = "";
+          appendNdjsonChunk(dec.decode(value, { stream: true }));
         }
-        if (acc) setLogOutput((prev) => prev + acc);
-        setLogOutput((prev) => prev + "\n--- Done ---\n");
+        appendNdjsonChunk(dec.decode());
+        if (ndBuf.trim()) {
+          const rest = ndBuf.trim();
+          try {
+            const o = JSON.parse(rest) as { line?: string; ping?: boolean };
+            if (!o.ping && typeof o.line === "string") appendLogText(o.line);
+          } catch {
+            appendLogText(rest + "\n");
+          }
+        }
+        logTextRef.current += "\n--- Done ---\n";
+        setLogOutput(logTextRef.current);
       } catch (e) {
         if ((e as Error).name === "AbortError") {
-          setLogOutput((prev) => prev + "\n--- Stopped ---\n");
+          logTextRef.current += "\n--- Stopped ---\n";
+          setLogOutput(logTextRef.current);
         } else {
-          setError(e instanceof Error ? e.message : "Run failed");
+          const msg = e instanceof Error ? e.message : "Run failed";
+          const hint =
+            /failed to fetch|networkerror|load failed|connection reset/i.test(msg)
+              ? " Long pipeline runs (upload/publisher) often hit this if Flask restarts: use `flask run --debug --no-reload`."
+              : "";
+          setError(msg + hint);
         }
       } finally {
         setRunning(false);
@@ -124,7 +167,10 @@ export function MainPage() {
     fetch(`${API}/stop`, { method: "POST" }).catch(() => {});
   }, []);
 
-  const clearLog = useCallback(() => setLogOutput(""), []);
+  const clearLog = useCallback(() => {
+    logTextRef.current = "";
+    setLogOutput("");
+  }, []);
 
   const rightPane =
     rightPaneMode === "log" ? (
@@ -222,6 +268,7 @@ export function MainPage() {
               </button>
             ))}
           </div>
+          <PipelineChatPanel />
         </div>
         {rightPane}
       </div>

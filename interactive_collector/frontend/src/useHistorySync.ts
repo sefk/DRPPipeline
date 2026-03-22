@@ -20,8 +20,14 @@ export function useHistorySync() {
   const { drpid } = useCollectorStore();
 
   useEffect(() => {
+    const path = window.location.pathname;
+    // Extension launcher carries ?drpid=&url= for MV3 storage + redirect. Replacing
+    // the query with only ?drpid= (or "") strips url= and breaks Copy & Open.
+    if (path.startsWith("/extension/")) {
+      return;
+    }
     const search = buildSearch(drpid);
-    const url = `${window.location.pathname}${search}`;
+    const url = `${path}${search}`;
     if (window.location.search !== search) {
       window.history.replaceState({ drpid }, "", url);
     }

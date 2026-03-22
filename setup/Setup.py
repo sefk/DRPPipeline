@@ -403,7 +403,7 @@ def _validate_together(config_path: Path, creds_path: Optional[Path]) -> list[tu
             str(creds_path),
             scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
         )
-        service = build("sheets", "v4", credentials=creds_obj)
+        service = build("sheets", "v4", credentials=creds_obj, cache_discovery=False)
         meta = (
             service.spreadsheets()
             .get(
