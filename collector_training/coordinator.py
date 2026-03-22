@@ -18,11 +18,11 @@ from collector_training.importer import list_examples
 from collector_training.trainer import (
     CollectorEvaluator,
     SimpleRefiner,
-    VERSIONS_DIR,
 )
 
 PROJECT_ROOT = Path(__file__).parent.parent
 COLLECTORS_DIR = PROJECT_ROOT / "collectors"
+TRAINING_ROOT = PROJECT_ROOT / "collector_training"
 
 
 @dataclass
@@ -109,6 +109,9 @@ class TrainingCoordinator:
         # Load the collector interface spec (lazy — only when first needed)
         self._interface_spec: Optional[str] = None
 
+        # Run date (YYYY-MM-DD local) — set when a run is created or loaded
+        self._run_date: Optional[str] = None
+
     # ── Public entry point ──────────────────────────────────────────────────
 
     def create_run(self, initial_collector_code: Optional[str] = None) -> int:
@@ -120,6 +123,7 @@ class TrainingCoordinator:
             initial_collector_code = self.collector_file.read_text(encoding="utf-8")
 
         now = datetime.now(timezone.utc).isoformat()
+        self._run_date = datetime.now().strftime("%Y-%m-%d")
         con = get_connection(self.db_path)
         try:
             cur = con.execute(
@@ -149,6 +153,18 @@ class TrainingCoordinator:
         Execute the training loop for an existing run_id.
         Training examples must be imported before calling this.
         """
+        # Load run date from DB if not already set (e.g. resuming an existing run)
+        if self._run_date is None:
+            con = get_connection(self.db_path)
+            try:
+                row = con.execute(
+                    "SELECT started_at FROM training_runs WHERE run_id=?", (run_id,)
+                ).fetchone()
+                if row:
+                    self._run_date = row["started_at"][:10]
+            finally:
+                con.close()
+
         training_examples = list_examples(
             run_id, include_validation=False, db_path=self.db_path
         )
@@ -296,9 +312,15 @@ class TrainingCoordinator:
 
     # ── Version management ──────────────────────────────────────────────────
 
+    def _version_dir(self) -> Path:
+        date = self._run_date or datetime.now().strftime("%Y-%m-%d")
+        d = TRAINING_ROOT / date
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def _version_path(self, run_id: int, iteration_num: int) -> Path:
         name = f"{self.config.collector_name}_run{run_id}_v{iteration_num}.py"
-        return VERSIONS_DIR / name
+        return self._version_dir() / name
 
     def _save_version(self, run_id: int, iteration_num: int, code: str) -> Path:
         path = self._version_path(run_id, iteration_num)

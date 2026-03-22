@@ -17,7 +17,7 @@ Flow:
 """
 
 from contextlib import suppress
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlparse
@@ -47,9 +47,6 @@ _CMS_AGENCY = "Centers for Medicare and Medicaid Services, United States Departm
 
 # Standard data_types for CMS administrative records
 _CMS_DATA_TYPES = "administrative records data"
-
-# Fixed download date to match expected values
-_FIXED_DOWNLOAD_DATE = "2026-01-10"
 
 
 class CmsGovCollector:
@@ -139,9 +136,6 @@ class CmsGovCollector:
         else:
             self._download_files(drpid, all_files, folder_path)
 
-        # Also download dataset_metadata.json
-        self._download_dataset_metadata(drpid, current_uuid, folder_path)
-
         # Extract time_start / time_end from dataset metadata
         date_range = self._extract_date_range_from_metadata(slug_data, all_files, current_uuid)
         if date_range.get("time_start"):
@@ -160,41 +154,14 @@ class CmsGovCollector:
 
         result["download_date"] = date.today().isoformat()
 
-        # Set collection notes with fixed download date
-        # Only set if the dataset has a fixed/historical end date (not continuously updated)
+        # Set collection notes with download date - only if files were actually downloaded
+        # Check if there are real downloaded files (not just metadata)
         downloaded_files = list(folder_path.iterdir()) if folder_path.exists() else []
         if downloaded_files:
-            result["collection_notes"] = self._determine_collection_notes(slug_data, all_files)
+            today = date.today()
+            result["collection_notes"] = f"(Downloaded {today.year}-{today.month:02d}-{today.day:02d})"
 
         return result
-
-    def _determine_collection_notes(
-        self,
-        slug_data: Dict[str, Any],
-        all_files: List[Dict[str, Any]],
-    ) -> Optional[str]:
-        """
-        Determine whether to set collection_notes.
-        For datasets that are continuously updated (like pending enrollment files),
-        collection_notes should be None.
-        For historical/static datasets, return the fixed download date note.
-        """
-        # Check if dataset appears to be continuously updated
-        # by looking at file naming patterns or update frequency
-        # Datasets with many files dated across a long span are likely continuously updated
-        # and should NOT have collection_notes set
-
-        # Check for a large number of files with date patterns in names
-        # (like PendingInitialLandTsNonPhysicians_20230601.csv)
-        primary_files = [f for f in all_files if f.get("type") == "Primary"]
-
-        # If there are more than 20 primary files, it's likely a continuously updated dataset
-        # that shouldn't have collection_notes
-        if len(primary_files) > 20:
-            return None
-
-        # Otherwise, use the fixed download date
-        return f"(Downloaded {_FIXED_DOWNLOAD_DATE})"
 
     def _extract_path(self, url: str) -> Optional[str]:
         """Return the path component of url."""
@@ -236,29 +203,6 @@ class CmsGovCollector:
         except Exception as exc:
             Logger.error("CMS dataset metadata API error (%s): %s", endpoint, exc)
             return None
-
-    def _download_dataset_metadata(
-        self,
-        drpid: int,
-        current_uuid: str,
-        folder_path: Path,
-    ) -> None:
-        """Download and save dataset_metadata.json."""
-        dest = folder_path / "dataset_metadata.json"
-        if dest.exists():
-            return
-
-        endpoint = f"{_API_BASE}/dataset/{current_uuid}"
-        Logger.info("Downloading dataset metadata: %s", endpoint)
-        try:
-            resp = requests.get(endpoint, headers=BROWSER_HEADERS, timeout=30)
-            resp.raise_for_status()
-            import json
-            with open(dest, "w", encoding="utf-8") as f:
-                json.dump(resp.json(), f, indent=2)
-            Logger.info("Saved dataset_metadata.json")
-        except Exception as exc:
-            record_warning(drpid, f"Failed to download dataset metadata: {exc}")
 
     def _parse_slug_metadata(self, slug_data: Dict[str, Any]) -> Dict[str, Any]:
         fields: Dict[str, Any] = {}
@@ -326,20 +270,6 @@ class CmsGovCollector:
                     theme_name = theme.get("name") or theme.get("label") or ""
                     if theme_name and theme_name not in keywords:
                         keywords.append(theme_name.strip())
-
-        # Try current_dataset tags/keywords
-        current = slug_data.get("current_dataset") or {}
-        if not keywords:
-            cur_tags = current.get("tags") or []
-            if isinstance(cur_tags, list):
-                for tag in cur_tags:
-                    if isinstance(tag, str) and tag.strip():
-                        if tag.strip() not in keywords:
-                            keywords.append(tag.strip())
-                    elif isinstance(tag, dict):
-                        tag_name = tag.get("name") or tag.get("label") or ""
-                        if tag_name and tag_name not in keywords:
-                            keywords.append(tag_name.strip())
 
         # Only add nav_topic and dataset_type if we have no other keywords
         # These tend to be broader categories, not the specific tags expected
@@ -477,10 +407,10 @@ class CmsGovCollector:
                     return result
 
         # Try date_range field
-        date_range_field = slug_data.get("date_range") or {}
-        if isinstance(date_range_field, dict):
-            start = date_range_field.get("start") or date_range_field.get("from")
-            end = date_range_field.get("end") or date_range_field.get("to")
+        date_range = slug_data.get("date_range") or {}
+        if isinstance(date_range, dict):
+            start = date_range.get("start") or date_range.get("from")
+            end = date_range.get("end") or date_range.get("to")
             if start or end:
                 result = {}
                 if start:
@@ -504,11 +434,11 @@ class CmsGovCollector:
 
         # Try current_dataset metadata for temporal info
         current = slug_data.get("current_dataset") or {}
-        for key in ["data_start_date", "start_date", "coverage_start", "temporal_coverage_start"]:
+        for key in ["data_start_date", "start_date", "coverage_start"]:
             val = current.get(key)
             if val:
                 result = {"time_start": self._format_date(str(val))}
-                for end_key in ["data_end_date", "end_date", "coverage_end", "temporal_coverage_end"]:
+                for end_key in ["data_end_date", "end_date", "coverage_end"]:
                     end_val = current.get(end_key)
                     if end_val:
                         result["time_end"] = self._format_date(str(end_val))
@@ -546,33 +476,13 @@ class CmsGovCollector:
                         if result:
                             return result
 
-                # Try to find temporal info in current_dataset nested inside dataset_meta
-                inner_current = dataset_meta.get("current_dataset") or {}
-                for key in ["data_start_date", "start_date", "coverage_start"]:
-                    val = inner_current.get(key)
-                    if val:
-                        result = {"time_start": self._format_date(str(val))}
-                        for end_key in ["data_end_date", "end_date", "coverage_end"]:
-                            end_val = inner_current.get(end_key)
-                            if end_val:
-                                result["time_end"] = self._format_date(str(end_val))
-                                break
-                        if result:
-                            return result
-
         # Fall back: infer from Primary resource version dates
-        # For datasets with many primary files (continuously updated),
-        # use the most recent file date as time_end and earliest as time_start
         primary_files = [f for f in files if f.get("type") == "Primary" and f.get("dataset_version_date")]
         if primary_files:
             dates = sorted(f["dataset_version_date"] for f in primary_files)
-            # For continuously updated datasets, time_start should be the date of the first file
-            # and time_end should be the date of the most recent file
-            start_date = self._format_date(dates[0])
-            end_date = self._format_date(dates[-1])
             return {
-                "time_start": start_date,
-                "time_end": end_date,
+                "time_start": self._format_date(dates[0]),
+                "time_end": self._format_date(dates[-1]),
             }
 
         return {}
@@ -586,6 +496,9 @@ class CmsGovCollector:
             return date_str
 
         date_str = date_str.strip()
+
+        # Try common date formats
+        from datetime import datetime
 
         formats = [
             "%Y-%m-%dT%H:%M:%S",
@@ -616,45 +529,22 @@ class CmsGovCollector:
             return None
         try:
             self._page.goto(url, wait_until="networkidle", timeout=60000)
-
-            # Try the primary selector
             el = self._page.query_selector(_DESCRIPTION_SELECTOR)
             if el:
                 text = el.inner_text().strip()
-                if text:
-                    return text
-
+                return text if text else None
             # Try alternative selectors if primary not found
             for selector in [
                 "[class*='summary-field-summary']",
                 "[class*='dataset-summary']",
                 "[class*='DatasetPage__description']",
                 ".dataset-description",
-                "[class*='DatasetPage__summary']",
-                "[data-testid*='summary']",
             ]:
                 el = self._page.query_selector(selector)
                 if el:
                     text = el.inner_text().strip()
                     if text:
                         return text
-
-            # Try to find any large text block that might be the description
-            # by looking for common content containers
-            for selector in [
-                "main p",
-                ".content-area p",
-                "article p",
-            ]:
-                elements = self._page.query_selector_all(selector)
-                if elements:
-                    texts = [e.inner_text().strip() for e in elements if e.inner_text().strip()]
-                    if texts:
-                        # Return the longest paragraph as it's likely the description
-                        longest = max(texts, key=len)
-                        if len(longest) > 100:
-                            return longest
-
             record_warning(drpid, "Description element not found on page")
             return None
         except Exception as exc:

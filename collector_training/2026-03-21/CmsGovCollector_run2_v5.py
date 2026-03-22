@@ -68,12 +68,6 @@ class CmsGovCollector:
         self._page: Optional[Page] = None
 
     def run(self, drpid: int) -> None:
-        """
-        Run the collector for a single project (ModuleProtocol interface).
-
-        Args:
-            drpid: The DRPID of the project to process.
-        """
         record = Storage.get(drpid)
         if record is None:
             record_error(drpid, f"Project record not found for DRPID: {drpid}", update_storage=False)
@@ -119,6 +113,12 @@ class CmsGovCollector:
             description = description.replace('\xa0', ' ')
             result["summary"] = description
 
+        # Also try to get summary from API if scraping failed
+        if not result.get("summary"):
+            api_summary = self._extract_summary_from_slug(slug_data)
+            if api_summary:
+                result["summary"] = api_summary
+
         current_uuid = (slug_data.get("current_dataset") or {}).get("uuid")
         taxonomy_uuid = slug_data.get("uuid")
 
@@ -160,13 +160,27 @@ class CmsGovCollector:
 
         result["download_date"] = date.today().isoformat()
 
-        # Set collection notes with fixed download date
-        # Only set if the dataset has a fixed/historical end date (not continuously updated)
-        downloaded_files = list(folder_path.iterdir()) if folder_path.exists() else []
-        if downloaded_files:
-            result["collection_notes"] = self._determine_collection_notes(slug_data, all_files)
+        # Determine collection_notes
+        collection_notes = self._determine_collection_notes(slug_data, all_files)
+        if collection_notes is not None:
+            result["collection_notes"] = collection_notes
 
         return result
+
+    def _update_storage(self, drpid: int, result: Dict[str, Any]) -> None:
+        """Update storage with collected fields."""
+        if not result:
+            record_error(drpid, "No data collected")
+            return
+
+        folder_path = result.get("folder_path")
+        if not folder_path:
+            record_error(drpid, "No folder_path in result - collection failed")
+            return
+
+        update_fields = {k: v for k, v in result.items() if v is not None}
+        update_fields["status"] = "collected"
+        Storage.update_record(drpid, update_fields)
 
     def _determine_collection_notes(
         self,
@@ -179,13 +193,6 @@ class CmsGovCollector:
         collection_notes should be None.
         For historical/static datasets, return the fixed download date note.
         """
-        # Check if dataset appears to be continuously updated
-        # by looking at file naming patterns or update frequency
-        # Datasets with many files dated across a long span are likely continuously updated
-        # and should NOT have collection_notes set
-
-        # Check for a large number of files with date patterns in names
-        # (like PendingInitialLandTsNonPhysicians_20230601.csv)
         primary_files = [f for f in all_files if f.get("type") == "Primary"]
 
         # If there are more than 20 primary files, it's likely a continuously updated dataset
@@ -237,6 +244,19 @@ class CmsGovCollector:
             Logger.error("CMS dataset metadata API error (%s): %s", endpoint, exc)
             return None
 
+    def _fetch_all_dataset_versions(self, taxonomy_uuid: str) -> List[Dict[str, Any]]:
+        """Fetch all dataset versions for a taxonomy UUID."""
+        endpoint = f"{_API_BASE}/dataset-type/{taxonomy_uuid}/datasets"
+        Logger.info("Fetching all dataset versions: %s", endpoint)
+        try:
+            resp = requests.get(endpoint, headers=BROWSER_HEADERS, timeout=30)
+            resp.raise_for_status()
+            body = resp.json()
+            return body.get("data") or []
+        except Exception as exc:
+            Logger.error("CMS dataset versions API error (%s): %s", endpoint, exc)
+            return []
+
     def _download_dataset_metadata(
         self,
         drpid: int,
@@ -259,6 +279,23 @@ class CmsGovCollector:
             Logger.info("Saved dataset_metadata.json")
         except Exception as exc:
             record_warning(drpid, f"Failed to download dataset metadata: {exc}")
+
+    def _extract_summary_from_slug(self, slug_data: Dict[str, Any]) -> Optional[str]:
+        """Try to extract summary/description from slug data API fields."""
+        # Check various possible field names
+        for key in ["description", "summary", "about", "overview", "body"]:
+            val = slug_data.get(key)
+            if val and isinstance(val, str) and len(val.strip()) > 20:
+                return val.strip()
+
+        # Check current_dataset
+        current = slug_data.get("current_dataset") or {}
+        for key in ["description", "summary", "about", "overview"]:
+            val = current.get(key)
+            if val and isinstance(val, str) and len(val.strip()) > 20:
+                return val.strip()
+
+        return None
 
     def _parse_slug_metadata(self, slug_data: Dict[str, Any]) -> Dict[str, Any]:
         fields: Dict[str, Any] = {}
@@ -329,17 +366,27 @@ class CmsGovCollector:
 
         # Try current_dataset tags/keywords
         current = slug_data.get("current_dataset") or {}
-        if not keywords:
-            cur_tags = current.get("tags") or []
-            if isinstance(cur_tags, list):
-                for tag in cur_tags:
-                    if isinstance(tag, str) and tag.strip():
-                        if tag.strip() not in keywords:
-                            keywords.append(tag.strip())
-                    elif isinstance(tag, dict):
-                        tag_name = tag.get("name") or tag.get("label") or ""
-                        if tag_name and tag_name not in keywords:
-                            keywords.append(tag_name.strip())
+        cur_tags = current.get("tags") or []
+        if isinstance(cur_tags, list):
+            for tag in cur_tags:
+                if isinstance(tag, str) and tag.strip():
+                    if tag.strip() not in keywords:
+                        keywords.append(tag.strip())
+                elif isinstance(tag, dict):
+                    tag_name = tag.get("name") or tag.get("label") or ""
+                    if tag_name and tag_name not in keywords:
+                        keywords.append(tag_name.strip())
+
+        cur_kws = current.get("keywords") or []
+        if isinstance(cur_kws, list):
+            for kw in cur_kws:
+                if isinstance(kw, str) and kw.strip():
+                    if kw.strip() not in keywords:
+                        keywords.append(kw.strip())
+                elif isinstance(kw, dict):
+                    kw_name = kw.get("name") or kw.get("label") or ""
+                    if kw_name and kw_name not in keywords:
+                        keywords.append(kw_name.strip())
 
         # Only add nav_topic and dataset_type if we have no other keywords
         # These tend to be broader categories, not the specific tags expected
@@ -560,14 +607,25 @@ class CmsGovCollector:
                         if result:
                             return result
 
+                # Try to extract from nested 'data' field if present
+                inner_data = dataset_meta.get("data") or {}
+                if isinstance(inner_data, dict):
+                    for key in ["data_start_date", "start_date", "coverage_start"]:
+                        val = inner_data.get(key)
+                        if val:
+                            result = {"time_start": self._format_date(str(val))}
+                            for end_key in ["data_end_date", "end_date", "coverage_end"]:
+                                end_val = inner_data.get(end_key)
+                                if end_val:
+                                    result["time_end"] = self._format_date(str(end_val))
+                                    break
+                            if result:
+                                return result
+
         # Fall back: infer from Primary resource version dates
-        # For datasets with many primary files (continuously updated),
-        # use the most recent file date as time_end and earliest as time_start
         primary_files = [f for f in files if f.get("type") == "Primary" and f.get("dataset_version_date")]
         if primary_files:
             dates = sorted(f["dataset_version_date"] for f in primary_files)
-            # For continuously updated datasets, time_start should be the date of the first file
-            # and time_end should be the date of the most recent file
             start_date = self._format_date(dates[0])
             end_date = self._format_date(dates[-1])
             return {
@@ -640,7 +698,6 @@ class CmsGovCollector:
                         return text
 
             # Try to find any large text block that might be the description
-            # by looking for common content containers
             for selector in [
                 "main p",
                 ".content-area p",
@@ -650,7 +707,6 @@ class CmsGovCollector:
                 if elements:
                     texts = [e.inner_text().strip() for e in elements if e.inner_text().strip()]
                     if texts:
-                        # Return the longest paragraph as it's likely the description
                         longest = max(texts, key=len)
                         if len(longest) > 100:
                             return longest
@@ -662,6 +718,9 @@ class CmsGovCollector:
             return None
 
     def _init_browser(self) -> bool:
+        # Don't re-init if already running
+        if self._browser and self._page:
+            return True
         try:
             self._playwright = sync_playwright().start()
             self._browser = self._playwright.chromium.launch(headless=self._headless)
@@ -682,14 +741,3 @@ class CmsGovCollector:
                 self._playwright.stop()
             self._playwright = None
         self._page = None
-
-    def _update_storage(self, drpid: int, result: Dict[str, Any]) -> None:
-        current = Storage.get(drpid)
-        if current and current.get("status") == "error":
-            result["status"] = "error"
-        elif result.get("folder_path") and not result.get("status"):
-            result["status"] = "collected"
-
-        fields = {k: v for k, v in result.items() if v is not None}
-        if fields:
-            Storage.update_record(drpid, fields)

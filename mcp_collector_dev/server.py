@@ -752,7 +752,7 @@ def evaluate_collector(
         from collector_training.schema import get_connection, init_eval_db
         from collector_training.importer import list_examples
         from collector_training.trainer import CollectorEvaluator, per_field_averages
-        from collector_training.coordinator import VERSIONS_DIR
+        from collector_training.coordinator import TRAINING_ROOT
 
         # Get run config
         db = _get_training_db()
@@ -773,8 +773,10 @@ def evaluate_collector(
         module_name = config.get("collector_module_name", "")
         collector_file = PROJECT_ROOT / "collectors" / f"{collector_name}.py"
 
-        # Load code for this iteration
-        version_file = VERSIONS_DIR / f"{collector_name}_run{run_id}_v{iteration_num}.py"
+        # Load code for this iteration — search date-based dirs then fall back to collector
+        run_date = run["started_at"][:10]
+        version_filename = f"{collector_name}_run{run_id}_v{iteration_num}.py"
+        version_file = TRAINING_ROOT / run_date / version_filename
         if version_file.exists():
             code = version_file.read_text(encoding="utf-8")
         else:
