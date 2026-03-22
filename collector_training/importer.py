@@ -138,39 +138,21 @@ def _extract_datalumos_workspace_id(url: str) -> Optional[str]:
     return None
 
 
-def _scrape_datalumos_project(workspace_id: str) -> Optional[dict[str, Any]]:
+def _scrape_datalumos_project(project_id: str) -> Optional[dict[str, Any]]:
     """
-    Scrape a DataLumos workspace project and return extracted fields.
+    Scrape a DataLumos public project view page.
 
-    Requires Playwright and DataLumos authentication (set in config.json).
-    Returns None if unavailable.
+    Uses the public /project/{id}/version/V1/view URL — no authentication
+    required, works for any project regardless of ownership.
+    Returns None if scraping fails.
     """
     try:
         import sys
         sys.path.insert(0, str(PROJECT_ROOT))
-
-        # Bootstrap Args for upload module (needed by DataLumosBrowserSession)
-        _argv_backup = sys.argv[:]
-        sys.argv = [sys.argv[0], "upload"]
-        from utils.Args import Args
-        from utils.Logger import Logger
-        if not Args._initialized:
-            Args.initialize()
-        sys.argv = _argv_backup
-        Logger.initialize(log_level="WARNING")
-
-        from upload.DataLumosBrowserSession import DataLumosBrowserSession
-        from tests.compare_datalumos import read_project
-
-        session = DataLumosBrowserSession()
-        try:
-            data = read_project(session, workspace_id)
-        finally:
-            session.close()
-
-        return data
+        from tests.compare_datalumos import read_project_public_view
+        return read_project_public_view(project_id)
     except Exception as exc:
-        print(f"Warning: could not scrape DataLumos workspace {workspace_id}: {exc}")
+        print(f"Warning: could not scrape DataLumos project {project_id}: {exc}")
         return None
 
 

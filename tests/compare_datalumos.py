@@ -30,6 +30,72 @@ from upload.DataLumosBrowserSession import DataLumosBrowserSession
 from upload.DataLumosFormFiller import DataLumosFormFiller
 
 WORKSPACE_URL = "https://www.datalumos.org/datalumos/workspace"
+PUBLIC_VIEW_URL = "https://www.datalumos.org/datalumos/project/{project_id}/version/V1/view"
+
+
+# ── Public view JS extractor ──────────────────────────────────────────────────
+# Scrapes the read-only public project view page (no authentication required).
+# All metadata fields use the pattern:
+#   <div class="panel-heading"><strong>Label:</strong><a>help link</a> value text</div>
+# Files are in a table.table-striped with file links in the first <td>.
+
+_EXTRACT_PUBLIC_VIEW_JS = """
+() => {
+    const clean = (text) => {
+        if (!text) return null;
+        return text.split('\\n')
+            .map(l => l.trim())
+            .filter(l => l)
+            .join('\\n')
+            .trim() || null;
+    };
+
+    // Title from h1
+    const titleEl = document.querySelector('h1');
+    const title = titleEl ? titleEl.innerText.trim() : null;
+
+    // Files: table.table-striped — file name in <a> inside the first <td>
+    const fileRows = Array.from(document.querySelectorAll('table.table-striped tbody tr'));
+    const files = fileRows.map(tr => {
+        const a = tr.querySelector('td a');
+        if (!a) return null;
+        const name = a.innerText.trim();
+        const href = a.getAttribute('href') || '';
+        return name ? { name, href } : null;
+    }).filter(Boolean);
+
+    // Generic metadata extractor: all fields share the panel-heading pattern
+    const fieldMap = {};
+    for (const el of document.querySelectorAll('div.panel-heading')) {
+        const strong = el.querySelector('strong');
+        if (!strong) continue;
+        const labelText = strong.innerText.replace(/:$/, '').trim().toLowerCase();
+        // Clone and strip the label and help-link <a> to isolate the value text
+        const clone = el.cloneNode(true);
+        clone.querySelectorAll('strong, a').forEach(e => e.remove());
+        const value = clean(clone.innerText);
+        if (value) fieldMap[labelText] = value;
+    }
+
+    // Subject Terms: split on semicolons into a list (consistent with workspace extractor)
+    const kwRaw = fieldMap['subject terms'];
+    const keywords = kwRaw
+        ? kwRaw.split(/[;\\n]+/).map(k => k.trim()).filter(Boolean)
+        : null;
+
+    return {
+        title:                title || fieldMap['project title'] || null,
+        summary:              fieldMap['summary'] || null,
+        agency:               fieldMap['agency'] || null,
+        keywords:             keywords,
+        geographic_coverage:  fieldMap['geographic coverage'] || null,
+        time_period:          fieldMap['time period(s)'] || fieldMap['time period'] || null,
+        data_types:           fieldMap['data type(s)'] || fieldMap['data types'] || null,
+        collection_notes:     fieldMap['collection notes'] || null,
+        files,
+    };
+}
+"""
 
 # ── ANSI colors ───────────────────────────────────────────────────────────────
 GREEN  = "\033[92m"
@@ -199,6 +265,57 @@ def read_project(session: DataLumosBrowserSession, workspace_id: str,
     data["_workspace_id"] = workspace_id
     data["_url"] = url
     return data
+
+
+def read_project_public_view(project_id: str, headless: bool = True,
+                             timeout: int = 120000) -> dict:
+    """
+    Scrape a DataLumos public project view page without authentication.
+
+    Works for any project regardless of ownership. Uses a standalone Playwright
+    session (does not require DataLumosBrowserSession or credentials).
+
+    Args:
+        project_id: Numeric project/workspace ID.
+        headless:   Run browser in headless mode (default True).
+        timeout:    Page load timeout in milliseconds.
+
+    Returns:
+        Dict with keys: title, summary, agency, keywords, geographic_coverage,
+        time_period, data_types, collection_notes, files.
+    """
+    from playwright.sync_api import sync_playwright
+
+    url = PUBLIC_VIEW_URL.format(project_id=project_id)
+    Logger.info(f"Scraping public view for project {project_id}: {url}")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=headless,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+            ],
+        )
+        context = browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+            locale="en-US",
+        )
+        context.set_default_timeout(timeout)
+        page = context.new_page()
+        try:
+            page.goto(url, wait_until="networkidle", timeout=timeout)
+            data = page.evaluate(_EXTRACT_PUBLIC_VIEW_JS)
+            data["_project_id"] = project_id
+            data["_url"] = url
+            return data
+        finally:
+            browser.close()
 
 
 # ── Comparison logic ──────────────────────────────────────────────────────────
