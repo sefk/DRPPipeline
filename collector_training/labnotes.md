@@ -4,6 +4,7 @@
 - [2026-03-19 — CmsGovCollector, Training Run 1: Initial Setup and POC](#2026-03-19--cmsgov-collector-training-run-1-initial-setup-and-poc)
 - [2026-03-21 — CmsGovCollector, Training Run 2: First Complete E2E](#2026-03-21--cmsgov-collector-training-run-2-first-complete-e2e)
 - [2026-03-22 — CmsGovCollector, Training Run 3: Expanded Dataset](#2026-03-22--cmsgov-collector-training-run-3-expanded-dataset)
+- [2026-03-23 — CmsGovCollector, Training Runs 4–10: Bug Fixes and First Successful Iteration](#2026-03-23--cmsgov-collector-training-runs-410-bug-fixes-and-first-successful-iteration)
 
 ---
 
@@ -132,4 +133,87 @@ DOM pattern on the public view:
 4. Execute training loop
 
 ### Results
-*(pending)*
+*(superseded — dataset was imported into run 4 and subsequent runs)*
+
+---
+
+## 2026-03-23 — CmsGovCollector, Training Runs 4–10: Bug Fixes and First Successful Iteration
+
+### Summary
+A long debugging session that uncovered and fixed four distinct bugs blocking
+the training loop. Run 10 iteration 2 achieved a score of **0.753** — the best
+result yet — and was promoted to production.
+
+### Dataset
+68 training / 17 validation examples (expanded from run 3's import). Examples
+were carried forward into each restart run via SQL copy.
+
+### Bugs Fixed
+
+#### 1. `run_training.py` — module-level code crashed `_find_module_class`
+`run_training.py` had hardcoded `RUN_ID = 2` and executed `int(sys.argv[1])` at
+module level. The Orchestrator's `_find_module_class` walks all packages with
+`pkgutil.walk_packages`, which imports the module and triggered the `int()`
+call with `sys.argv[1] = "cms_collector"` → `ValueError`. Fixed by guarding all
+executable code under `if __name__ == "__main__"` and loading config from the
+DB for the given run_id.
+
+#### 2. `CmsGovCollector.py` — missing `_update_storage` / `_cleanup_browser`
+A previous training run's `_finalize` step had overwritten
+`collectors/CmsGovCollector.py` with a version that lacked `_update_storage`
+and `_cleanup_browser`. Both methods were called in `run()` but not defined,
+causing every evaluation to score 0.000 with `AttributeError`. Restored from
+the last git commit and added the LLM-generated improvements from run 6
+(`_fetch_slug_with_fallback`, additional description selectors).
+
+#### 3. `max_tokens=8192` — LLM output truncated on every refinement
+The collector file is ~6 500 tokens. With `max_tokens=8192` the LLM had barely
+enough room to output an unchanged file, let alone add improvements — every
+generated version was truncated mid-statement, producing a `SyntaxError`.
+Increased to `max_tokens=16000`. Also added:
+- Syntax validation in `SimpleRefiner.refine()` — falls back to original code
+  rather than saving a broken version
+- Syntax check in `_finalize()` — refuses to overwrite the production collector
+  with a syntactically invalid file
+
+#### 4. Anthropic API credit exhaustion
+Runs 8 and 9 failed mid-run with `BadRequestError: credit balance too low`.
+Resolved by topping up the correct account ("Sef's Individual Org",
+key `sk-ant-api03-AhSdCDk...`).
+
+### Score Trajectory (runs 4–10)
+
+| Run | Best Score | Best Iter | Notes |
+|-----|-----------|-----------|-------|
+| 4 | — | — | Stopped: 0 iterations (bug 1) |
+| 5 | 0.000 | — | All iterations crashed (bugs 1+2) |
+| 6 | 0.666 | 1 | Bug 1 fixed; iters 2–5 crashed (bug 3) |
+| 7 | — | — | Stopped pre-run |
+| 8 | — | — | Stopped pre-run |
+| 9 | 0.666 | 1 | Bugs 1+2 fixed; iters 2–5 crashed (bug 3) |
+| 10 | **0.753** | **2** | All bugs fixed; stopped by user after iter 2 |
+
+Run 10 iteration 1 baseline scored ~0.666 aggregate (0.846 on working examples,
+0.000 on ~20 examples where the Slug API returns nothing for long paths). The
+LLM-refined v2 pushed to **0.753**. Run was stopped before further iterations.
+
+### Production Promotion
+`collectors/CmsGovCollector.py` ← `CmsGovCollector_run10_v2.py` (score 0.753).
+
+### Infrastructure Improvements
+- `run_training.py` now accepts `<run_id>` as a CLI argument and loads config
+  from the DB — can restart any run without editing the script
+- `SimpleRefiner` now supports multiple LLM backends: `claude-*` → Anthropic
+  API, `gemini-*` → Google Generative Language API
+- Gemini auth supports both `GOOGLE_API_KEY` and service account credentials
+  (`google-credentials.json` / `GOOGLE_APPLICATION_CREDENTIALS`)
+- Training docs updated with multi-backend usage and chat interface examples
+
+### Remaining Issues
+- ~20 examples consistently score 0.000 due to "Slug API returned nothing"
+  for certain URL paths (long innovation center program paths). These drag down
+  the aggregate. Either the fallback logic needs improvement or these examples
+  should be excluded from training.
+- Run 10 was stopped at iteration 2 — more iterations may improve further.
+  Next session: resume or start a new run, and kick off Haiku / Gemini
+  comparison runs.
