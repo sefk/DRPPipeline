@@ -417,22 +417,44 @@ class SimpleRefiner:
         )
 
     def _call_gemini(self, prompt: str) -> tuple[str, int, int]:
-        import os
-        from openai import OpenAI
-        client = OpenAI(
-            api_key=os.environ["GOOGLE_API_KEY"],
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        import os, requests as _requests
+        api_key = os.environ.get("GOOGLE_API_KEY")
+        if api_key:
+            headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
+        else:
+            # Fall back to service account credentials (GOOGLE_APPLICATION_CREDENTIALS
+            # or google-credentials.json in the project root)
+            from google.oauth2 import service_account
+            from google.auth.transport.requests import Request as _GRequest
+            creds_path = os.environ.get(
+                "GOOGLE_APPLICATION_CREDENTIALS",
+                str(PROJECT_ROOT / "google-credentials.json"),
+            )
+            _creds = service_account.Credentials.from_service_account_file(
+                creds_path,
+                scopes=["https://www.googleapis.com/auth/generative-language"],
+            )
+            _creds.refresh(_GRequest())
+            headers = {"Content-Type": "application/json",
+                       "Authorization": f"Bearer {_creds.token}"}
+
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{self.model}:generateContent"
         )
-        response = client.chat.completions.create(
-            model=self.model,
-            max_tokens=16000,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        usage = response.usage
+        body = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"maxOutputTokens": 16000},
+        }
+        resp = _requests.post(url, headers=headers, json=body, timeout=120)
+        resp.raise_for_status()
+        data = resp.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        usage = data.get("usageMetadata", {})
         return (
-            response.choices[0].message.content,
-            usage.prompt_tokens,
-            usage.completion_tokens,
+            text,
+            usage.get("promptTokenCount", 0),
+            usage.get("candidatesTokenCount", 0),
         )
 
 

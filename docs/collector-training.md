@@ -508,10 +508,10 @@ This means DSPy can learn:
 
 `SimpleRefiner` routes to the right API based on model name prefix:
 
-| Model name prefix | Backend | API key env var |
-|-------------------|---------|-----------------|
+| Model name prefix | Backend | Auth |
+|-------------------|---------|------|
 | `claude-*` | Anthropic API | `ANTHROPIC_API_KEY` |
-| `gemini-*` | Google (OpenAI-compatible endpoint) | `GOOGLE_API_KEY` |
+| `gemini-*` | Google Generative Language API | `GOOGLE_API_KEY` **or** service account (`google-credentials.json` / `GOOGLE_APPLICATION_CREDENTIALS`). Requires Generative Language API enabled in the GCP project. |
 
 ### Configured pricing
 
@@ -813,12 +813,17 @@ Start a run using the Haiku model instead of Sonnet.
 Run training with gemini-2.5-flash to compare cost vs quality.
 ```
 
-For Gemini, Claude will remind you to set `GOOGLE_API_KEY` if it isn't already
-in your environment:
+For Gemini, the pipeline supports two auth methods (tried in order):
 
-```
-! export GOOGLE_API_KEY=your-key-here
-```
+1. **API key** — set `GOOGLE_API_KEY` in your environment:
+   ```
+   ! export GOOGLE_API_KEY=your-key-here
+   ```
+
+2. **Service account** — uses `google-credentials.json` in the project root
+   (already provisioned), or the path in `GOOGLE_APPLICATION_CREDENTIALS`.
+   Requires the **Generative Language API** to be enabled in the Google Cloud
+   project associated with the credentials.
 
 ### Promoting a trained version
 
