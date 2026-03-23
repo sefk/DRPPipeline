@@ -384,7 +384,7 @@ class SimpleRefiner:
         client = anthropic.Anthropic()
         message = client.messages.create(
             model=self.model,
-            max_tokens=8192,
+            max_tokens=16000,
             messages=[{"role": "user", "content": prompt}],
         )
 
@@ -392,6 +392,18 @@ class SimpleRefiner:
         # Strip any accidental ``` fencing
         improved_code = re.sub(r"^```(?:python)?\s*\n?", "", improved_code)
         improved_code = re.sub(r"\n?```\s*$", "", improved_code)
+
+        # Validate syntax — fall back to original code if truncated/broken
+        import ast as _ast
+        try:
+            _ast.parse(improved_code)
+        except SyntaxError:
+            import warnings
+            warnings.warn(
+                f"Refiner output has syntax error (likely truncated at "
+                f"{message.usage.output_tokens} tokens) — keeping original code"
+            )
+            improved_code = collector_code
 
         usage = {
             "input_tokens":  message.usage.input_tokens,

@@ -508,8 +508,15 @@ class TrainingCoordinator:
 
     def _finalize(self, run_id: int, best_iteration: int) -> Optional[Path]:
         """Copy the best version back to the canonical collector file."""
+        import ast
         best_path = self._version_path(run_id, best_iteration)
         if not best_path.exists():
+            return None
+        code = best_path.read_text(encoding="utf-8")
+        try:
+            ast.parse(code)
+        except SyntaxError as e:
+            print(f"  WARNING: best version (iteration {best_iteration}) has syntax error — skipping finalize: {e}")
             return None
         shutil.copy2(best_path, self.collector_file)
         print(f"  Best version (iteration {best_iteration}) written to {self.collector_file}")
