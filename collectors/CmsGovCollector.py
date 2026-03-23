@@ -110,8 +110,11 @@ class CmsGovCollector:
 
         slug_data = self._fetch_slug(url_path)
         if not slug_data:
-            record_error(drpid, f"Slug API returned nothing for path: {url_path}")
-            return result
+            # Try alternative slug fetch with different path variations
+            slug_data = self._fetch_slug_with_fallback(url, url_path, drpid)
+            if not slug_data:
+                record_error(drpid, f"Slug API returned nothing for path: {url_path}")
+                return result
 
         result.update(self._parse_slug_metadata(slug_data))
 
@@ -123,6 +126,10 @@ class CmsGovCollector:
 
         current_uuid = (slug_data.get("current_dataset") or {}).get("uuid")
         taxonomy_uuid = slug_data.get("uuid")
+
+        if not current_uuid:
+            # Try to get current_uuid from the slug data itself
+            current_uuid = slug_data.get("current_uuid") or slug_data.get("dataset_uuid")
 
         if not current_uuid:
             record_error(drpid, "Slug API response missing current_dataset.uuid")
@@ -182,6 +189,59 @@ class CmsGovCollector:
             result["collection_notes"] = self._determine_collection_notes(slug_data, all_files)
 
         return result
+
+    def _fetch_slug_with_fallback(self, url: str, url_path: str, drpid: int) -> Optional[Dict[str, Any]]:
+        """
+        Try alternative API approaches when the standard slug fetch fails.
+        For innovation center programs URLs, try different path variations.
+        """
+        # Try fetching via the full URL directly
+        Logger.info("Trying fallback slug fetch for: %s", url)
+
+        # Try with trailing slash removed or added
+        variations = []
+        if url_path.endswith("/"):
+            variations.append(url_path.rstrip("/"))
+        else:
+            variations.append(url_path + "/")
+
+        # Try just the last segment
+        parts = url_path.strip("/").split("/")
+        if len(parts) > 1:
+            variations.append("/" + parts[-1])
+            # Try with parent path
+            if len(parts) > 2:
+                variations.append("/" + "/".join(parts[-2:]))
+
+        for path_var in variations:
+            Logger.info("Trying slug path variation: %s", path_var)
+            data = self._fetch_slug(path_var)
+            if data:
+                return data
+
+        # Try the dataset search API
+        dataset_name = parts[-1] if parts else ""
+        if dataset_name:
+            search_data = self._search_dataset_by_name(dataset_name)
+            if search_data:
+                return search_data
+
+        return None
+
+    def _search_dataset_by_name(self, dataset_name: str) -> Optional[Dict[str, Any]]:
+        """Try to find a dataset by searching the CMS API."""
+        search_url = f"{_API_BASE}/dataset?keyword={quote(dataset_name)}&size=5"
+        Logger.info("Searching CMS API: %s", search_url)
+        try:
+            resp = requests.get(search_url, headers=BROWSER_HEADERS, timeout=30)
+            resp.raise_for_status()
+            body = resp.json()
+            items = body.get("data") or []
+            if isinstance(items, list) and items:
+                return items[0]
+        except Exception as exc:
+            Logger.error("CMS search API error: %s", exc)
+        return None
 
     def _determine_collection_notes(
         self,
@@ -268,7 +328,6 @@ class CmsGovCollector:
         try:
             resp = requests.get(endpoint, headers=BROWSER_HEADERS, timeout=30)
             resp.raise_for_status()
-            import json
             with open(dest, "w", encoding="utf-8") as f:
                 json.dump(resp.json(), f, indent=2)
             Logger.info("Saved dataset_metadata.json")
@@ -647,11 +706,15 @@ class CmsGovCollector:
                 ".dataset-description",
                 "[class*='DatasetPage__summary']",
                 "[data-testid*='summary']",
+                "[class*='summary-container']",
+                "[class*='page-summary']",
+                "[class*='dataset-description']",
+                "[class*='DatasetPage']",
             ]:
                 el = self._page.query_selector(selector)
                 if el:
                     text = el.inner_text().strip()
-                    if text:
+                    if text and len(text) > 50:
                         return text
 
             # Try to find any large text block that might be the description
@@ -660,6 +723,8 @@ class CmsGovCollector:
                 "main p",
                 ".content-area p",
                 "article p",
+                "[class*='description'] p",
+                "[class*='summary'] p",
             ]:
                 elements = self._page.query_selector_all(selector)
                 if elements:
@@ -675,17 +740,6 @@ class CmsGovCollector:
         except Exception as exc:
             record_warning(drpid, f"Failed to scrape description: {exc}")
             return None
-
-    def _init_browser(self) -> bool:
-        try:
-            self._playwright = sync_playwright().start()
-            self._browser = self._playwright.chromium.launch(headless=self._headless)
-            self._page = self._browser.new_page()
-            return True
-        except Exception as exc:
-            Logger.error("Failed to initialize browser: %s", exc)
-            self._cleanup_browser()
-            return False
 
     def _cleanup_browser(self) -> None:
         if self._browser:
@@ -708,3 +762,13 @@ class CmsGovCollector:
         fields = {k: v for k, v in result.items() if v is not None}
         if fields:
             Storage.update_record(drpid, fields)
+
+    def _init_browser(self) -> bool:
+        try:
+            self._playwright = sync_playwright().start()
+            self._browser = self._playwright.chromium.launch(headless=self._headless)
+            self._page = self._browser.new_page()
+            return True
+        except Exception as exc:
+            Logger.error("Failed to initialize browser: %s", exc)
+            self._cleanup_browser
