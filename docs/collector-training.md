@@ -759,6 +759,91 @@ training workflow. These should be added to `mcp_collector_dev/server.py`.
 
 ---
 
+## Using the Chat Interface
+
+All training operations can be driven through natural language in Claude Code.
+The `drp-collector-dev` MCP server is loaded automatically, so you can just
+describe what you want.
+
+### Starting a new run
+
+```
+Start a new training run for CmsGovCollector using claude-haiku-4-5-20251001.
+```
+
+```
+Start a training run for CmsGovCollector with gemini-2.5-flash, max 8 iterations
+and a $5 budget.
+```
+
+Claude will call `start_training_run`, copy examples from the most recent run
+for the same collector, and launch the coordinator in the background.
+
+### Checking status
+
+```
+What's the status of training run 10?
+```
+
+```
+How is the training going?
+```
+
+### Stopping and restarting
+
+```
+Stop training run 10.
+```
+
+```
+Let's restart training run 10.
+```
+
+Restarting creates a new run (e.g. run 11) with the same config and examples,
+then starts the coordinator fresh. Use this after fixing a bug or changing a
+model parameter.
+
+### Changing the model backend
+
+```
+Start a run using the Haiku model instead of Sonnet.
+```
+
+```
+Run training with gemini-2.5-flash to compare cost vs quality.
+```
+
+For Gemini, Claude will remind you to set `GOOGLE_API_KEY` if it isn't already
+in your environment:
+
+```
+! export GOOGLE_API_KEY=your-key-here
+```
+
+### Promoting a trained version
+
+```
+What's the best collector version generated so far?
+```
+
+```
+Promote run 10 iteration 2 to the production collector.
+```
+
+### Parallel comparison runs
+
+To compare models side-by-side, ask Claude to start multiple runs at once:
+
+```
+Start two training runs in parallel — one with claude-haiku-4-5-20251001
+and one with gemini-2.5-flash — so we can compare cost and quality.
+```
+
+Claude will launch both runs in the background and report results for each
+when they complete.
+
+---
+
 ## Parallel Agents
 
 ### Strategy
