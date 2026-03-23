@@ -61,11 +61,14 @@ class RunLogger:
         self._write("DECIDE", f"{action} — {reason}")
 
     def example_done(self, result: dict[str, Any]) -> None:
-        url = result.get("source_url", "?")
+        url   = result.get("source_url", "?")
         score = result.get("score", 0.0)
-        err = result.get("error_message")
-        suffix = f"  ERROR: {err}" if err else ""
-        self._write("EXAMPLE", f"{score:.3f}  {url}{suffix}")
+        pf    = result.get("per_field") or {}
+        err   = result.get("error_message")
+        # Format: "<score> <compact_json_per_field> <url>[ ERROR: <msg>]"
+        pf_str = json.dumps({k: round(v, 4) for k, v in pf.items()}, separators=(",", ":"))
+        suffix = f" ERROR: {err}" if err else ""
+        self._write("EXAMPLE", f"{score:.4f} {pf_str} {url}{suffix}")
 
     def close(self) -> None:
         self._file.close()
