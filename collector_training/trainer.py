@@ -17,7 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from collector_training.schema import get_connection, init_eval_db, DEFAULT_DB_PATH
 from collector_training.scorer import (
@@ -156,18 +156,17 @@ class CollectorEvaluator:
 
     # ── Public evaluation methods ───────────────────────────────────────────
 
-    def evaluate_one(
+    def _eval_one_inner(
         self,
         source_url: str,
         ground_truth: dict[str, Any],
-        candidate_code: str,
+        example_id: Optional[int],
     ) -> dict[str, Any]:
         """
-        Evaluate candidate collector against one URL.
-
-        Returns dict with: score, per_field, diff, collector_output, error_message.
+        Evaluate the already-written collector against one URL.
+        Does NOT touch the collector file — caller manages that.
+        Thread-safe: each call uses its own DB record and subprocess.
         """
-        original_code = self._write_candidate(candidate_code)
         drpid = self._create_eval_record(source_url)
         error_message: Optional[str] = None
         collector_output: dict[str, Any] = {}
@@ -200,44 +199,65 @@ class CollectorEvaluator:
                 "collector_output":  collector_output,
                 "error_message":     error_message,
                 "source_url":        source_url,
+                "example_id":        example_id,
             }
         finally:
-            self._restore_original(original_code)
             self._delete_eval_record(drpid)
+
+    def evaluate_one(
+        self,
+        source_url: str,
+        ground_truth: dict[str, Any],
+        candidate_code: str,
+    ) -> dict[str, Any]:
+        """
+        Evaluate candidate collector against one URL.
+        Writes and restores the collector file around the evaluation.
+
+        Returns dict with: score, per_field, diff, collector_output, error_message.
+        """
+        original_code = self._write_candidate(candidate_code)
+        try:
+            return self._eval_one_inner(source_url, ground_truth, example_id=None)
+        finally:
+            self._restore_original(original_code)
 
     def evaluate_all(
         self,
         examples: list[dict[str, Any]],
         candidate_code: str,
         num_workers: int = 1,
+        on_example_done: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> list[dict[str, Any]]:
         """
         Evaluate candidate against all training examples.
 
-        num_workers > 1 enables within-iteration parallelism (Phase 5).
-        WARNING: parallel evaluation requires the collector file swap to be
-        thread-safe; use separate worktrees for true parallelism.
+        Writes the candidate file ONCE, runs all evaluations (optionally in
+        parallel using ThreadPoolExecutor), then restores the original.
+        Safe for num_workers > 1 because subprocesses import the file at
+        startup — the file is stable for the duration of all subprocesses.
         """
+        original_code = self._write_candidate(candidate_code)
         results: list[dict[str, Any]] = []
 
-        if num_workers <= 1:
-            for ex in examples:
-                # Group annotators for the same URL and take best score
-                gt = ex.get("ground_truth") or json.loads(ex.get("ground_truth_json", "{}"))
-                result = self.evaluate_one(ex["source_url"], gt, candidate_code)
-                result["example_id"] = ex.get("example_id")
-                results.append(result)
-        else:
-            def _eval(ex):
-                gt = ex.get("ground_truth") or json.loads(ex.get("ground_truth_json", "{}"))
-                result = self.evaluate_one(ex["source_url"], gt, candidate_code)
-                result["example_id"] = ex.get("example_id")
-                return result
+        def _eval(ex: dict[str, Any]) -> dict[str, Any]:
+            gt = ex.get("ground_truth") or json.loads(ex.get("ground_truth_json", "{}"))
+            result = self._eval_one_inner(ex["source_url"], gt, ex.get("example_id"))
+            if on_example_done is not None:
+                on_example_done(result)
+            return result
 
-            with ThreadPoolExecutor(max_workers=num_workers) as pool:
-                futures = {pool.submit(_eval, ex): ex for ex in examples}
-                for fut in as_completed(futures):
-                    results.append(fut.result())
+        try:
+            if num_workers <= 1:
+                for ex in examples:
+                    results.append(_eval(ex))
+            else:
+                with ThreadPoolExecutor(max_workers=num_workers) as pool:
+                    futures = {pool.submit(_eval, ex): ex for ex in examples}
+                    for fut in as_completed(futures):
+                        results.append(fut.result())
+        finally:
+            self._restore_original(original_code)
 
         return results
 
@@ -388,6 +408,7 @@ def run_iteration(
     db_path: Optional[Path] = None,
     refinement_strategy: Optional[str] = None,
     num_workers: int = 1,
+    on_example_done: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> dict[str, Any]:
     """
     Execute one evaluate → analyze → refine cycle.
@@ -417,7 +438,9 @@ def run_iteration(
 
     # 1. Evaluate
     results = evaluator.evaluate_all(
-        training_examples, collector_code, num_workers=num_workers
+        training_examples, collector_code,
+        num_workers=num_workers,
+        on_example_done=on_example_done,
     )
 
     aggregate_score = (

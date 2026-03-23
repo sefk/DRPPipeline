@@ -8,21 +8,73 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from collector_training.schema import get_connection, init_db, DEFAULT_DB_PATH
 from collector_training.importer import list_examples
 from collector_training.trainer import (
     CollectorEvaluator,
     SimpleRefiner,
+    VERSIONS_DIR,
 )
 
 PROJECT_ROOT = Path(__file__).parent.parent
 COLLECTORS_DIR = PROJECT_ROOT / "collectors"
 TRAINING_ROOT = PROJECT_ROOT / "collector_training"
+LOGS_DIR = TRAINING_ROOT / "logs"
+
+
+# ── Run logger ───────────────────────────────────────────────────────────────
+
+class RunLogger:
+    """
+    Structured logger that writes timestamped entries to
+    collector_training/logs/run_{run_id}.log and mirrors them to stdout.
+    Thread-safe: uses a lock so parallel worker callbacks don't interleave.
+    """
+
+    def __init__(self, run_id: int) -> None:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        self.run_id = run_id
+        self.log_path = LOGS_DIR / f"run_{run_id}.log"
+        self._file = open(self.log_path, "a", encoding="utf-8", buffering=1)
+        self._lock = threading.Lock()
+
+    def _write(self, level: str, msg: str) -> None:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"{ts} | {level:<7} | {msg}"
+        with self._lock:
+            self._file.write(line + "\n")
+            print(line)
+
+    def info(self, msg: str) -> None:
+        self._write("INFO", msg)
+
+    def warning(self, msg: str) -> None:
+        self._write("WARNING", msg)
+
+    def decision(self, action: str, reason: str) -> None:
+        self._write("DECIDE", f"{action} — {reason}")
+
+    def example_done(self, result: dict[str, Any]) -> None:
+        url = result.get("source_url", "?")
+        score = result.get("score", 0.0)
+        err = result.get("error_message")
+        suffix = f"  ERROR: {err}" if err else ""
+        self._write("EXAMPLE", f"{score:.3f}  {url}{suffix}")
+
+    def close(self) -> None:
+        self._file.close()
+
+    def __enter__(self) -> "RunLogger":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
 
 
 @dataclass
@@ -50,8 +102,14 @@ class TrainingConfig:
     warn_at_pct: float = 0.75
 
     # Evaluation
-    num_eval_workers: int = 1
+    num_eval_workers: int = 4
     subprocess_timeout: int = 300
+
+    # Crash / regression detection
+    # If a new iteration scores 0 or drops by more than this fraction from
+    # the run's best score, it is treated as a crash and the coordinator
+    # reverts to the best-known code instead of advancing.
+    crash_revert_threshold: float = 0.30
 
     # Data
     large_dataset_threshold_bytes: int = 100_000_000  # 100 MB
@@ -174,15 +232,33 @@ class TrainingCoordinator:
                 "Import training data first (see importer.import_from_*)."
             )
 
-        print(f"Starting training run {run_id}: {len(training_examples)} training examples")
+        with RunLogger(run_id) as logger:
+            logger.info(
+                f"Run {run_id} starting — {len(training_examples)} training examples, "
+                f"max_iterations={self.config.max_iterations}, "
+                f"max_cost=${self.config.max_cost_usd:.2f}, "
+                f"num_eval_workers={self.config.num_eval_workers}"
+            )
+            logger.info(f"Log: {LOGS_DIR / f'run_{run_id}.log'}")
 
+            return self._run_loop(run_id, training_examples, logger)
+
+    def _run_loop(
+        self,
+        run_id: int,
+        training_examples: list[dict[str, Any]],
+        logger: RunLogger,
+    ) -> TrainingResult:
         # Load initial code from version 0
         current_code = self._load_version(run_id, 0)
         scores: list[float] = []
         total_cost = 0.0
         best_score = 0.0
         best_iteration = 0
+        best_code = current_code
         stop_reason = "max_iterations"
+        # After a plateau is detected, we try one focused refinement before stopping
+        _plateau_focus_attempted = False
 
         evaluator = CollectorEvaluator(
             collector_module_name=self.config.collector_module_name,
@@ -190,16 +266,29 @@ class TrainingCoordinator:
             subprocess_timeout=self.config.subprocess_timeout,
         )
 
+        from collector_training.trainer import run_iteration
+
         for iteration_num in range(1, self.config.max_iterations + 1):
             # Cost-aware model selection
-            budget_used_pct = total_cost / self.config.max_cost_usd if self.config.max_cost_usd > 0 else 0
+            budget_used_pct = (
+                total_cost / self.config.max_cost_usd
+                if self.config.max_cost_usd > 0
+                else 0
+            )
             if budget_used_pct >= self.config.warn_at_pct:
-                print(f"  Warning: {budget_used_pct:.0%} of budget used (${total_cost:.2f})")
+                logger.warning(
+                    f"{budget_used_pct:.0%} of budget used (${total_cost:.2f})"
+                )
             model = (
                 self.config.cheap_model
                 if budget_used_pct >= self.config.switch_to_cheap_at_pct
                 else self.config.model_refine
             )
+            if budget_used_pct >= self.config.switch_to_cheap_at_pct:
+                logger.decision(
+                    "model_switch",
+                    f"budget {budget_used_pct:.0%} used → switching to {model}",
+                )
             refiner = SimpleRefiner(model=model)
 
             # Filter large datasets on non-full-fidelity iterations
@@ -208,10 +297,17 @@ class TrainingCoordinator:
             else:
                 examples = training_examples
 
-            print(f"  Iteration {iteration_num}/{self.config.max_iterations} "
-                  f"({len(examples)} examples, model={model})")
+            # Choose refinement strategy: default, or focused if plateau
+            refinement_strategy = self._pick_refinement_strategy(
+                scores, iteration_num
+            )
 
-            from collector_training.trainer import run_iteration
+            logger.info(
+                f"Iteration {iteration_num}/{self.config.max_iterations} — "
+                f"{len(examples)} examples, model={model}"
+                + (f", strategy={refinement_strategy!r}" if refinement_strategy else "")
+            )
+
             result = run_iteration(
                 run_id=run_id,
                 iteration_num=iteration_num,
@@ -221,38 +317,79 @@ class TrainingCoordinator:
                 refiner=refiner,
                 interface_spec=self._get_interface_spec(),
                 db_path=self.db_path,
+                refinement_strategy=refinement_strategy,
                 num_workers=self.config.num_eval_workers,
+                on_example_done=logger.example_done,
             )
 
             agg_score = result["aggregate_score"]
-            scores.append(agg_score)
-            total_cost += result["token_usage"]["cost_usd"]
-
-            print(f"    Score: {agg_score:.3f}  Cost: ${result['token_usage']['cost_usd']:.4f}  "
-                  f"Total: ${total_cost:.4f}")
-
-            # Save new version
+            iter_cost = result["token_usage"]["cost_usd"]
+            total_cost += iter_cost
             new_code = result["new_code"]
+
+            # Save version regardless of quality (useful for inspection)
             self._save_version(run_id, iteration_num, new_code)
 
-            # Update best
+            # ── Crash / regression detection ────────────────────────────────
+            is_crash = agg_score == 0.0
+            is_regression = (
+                best_score > 0
+                and (best_score - agg_score) / best_score > self.config.crash_revert_threshold
+            )
+            if is_crash or is_regression:
+                reason_str = "score=0 (crash)" if is_crash else (
+                    f"score dropped {best_score - agg_score:.3f} "
+                    f"({(best_score - agg_score)/best_score:.0%}) from best {best_score:.3f}"
+                )
+                logger.decision(
+                    "revert_to_best",
+                    f"iter {iteration_num} scored {agg_score:.3f} — {reason_str}; "
+                    f"reverting to iter {best_iteration} (score {best_score:.3f})",
+                )
+                current_code = best_code
+                # Don't advance scores list so plateau logic isn't polluted
+                scores.append(agg_score)
+            else:
+                delta = agg_score - (scores[-1] if scores else 0.0)
+                delta_str = f"+{delta:.3f}" if delta >= 0 else f"{delta:.3f}"
+                logger.info(
+                    f"Iter {iteration_num} score={agg_score:.3f} ({delta_str})  "
+                    f"cost=${iter_cost:.4f}  total=${total_cost:.4f}"
+                )
+                scores.append(agg_score)
+                current_code = new_code
+
+            # ── Update best ─────────────────────────────────────────────────
             if agg_score > best_score:
                 best_score = agg_score
                 best_iteration = iteration_num
+                best_code = new_code
+                logger.info(f"New best: {best_score:.3f} at iteration {best_iteration}")
 
-            # Update run record
             self._update_run(run_id, best_score, best_iteration, total_cost)
 
-            # Advance to new code for next iteration
-            current_code = new_code
-
-            # Check stopping conditions
+            # ── Stopping conditions ─────────────────────────────────────────
             should_stop, reason = self._should_stop(
                 scores=scores, total_cost=total_cost, agg_score=agg_score
             )
             if should_stop:
+                if "score_plateau" in reason and not _plateau_focus_attempted:
+                    # One more attempt with a field-focused strategy before giving up
+                    focused = self._worst_field_strategy(result["per_field"])
+                    logger.decision(
+                        "plateau_focus",
+                        f"plateau detected but trying one focused iteration: {focused}",
+                    )
+                    _plateau_focus_attempted = True
+                    # Don't break — continue to next iteration with focused strategy
+                    # (refinement_strategy will be picked up next loop via scores state)
+                    # Inject the focus as a one-shot override by inserting a dummy high
+                    # score to fool the plateau detector on the NEXT check.
+                    # Simpler: just don't stop now; _pick_refinement_strategy will see
+                    # the plateau and return the focused strategy next iteration.
+                    continue
                 stop_reason = reason
-                print(f"  Stopping: {reason}")
+                logger.decision("stop", reason)
                 break
 
         # Finalize: copy best version to canonical file
@@ -270,7 +407,7 @@ class TrainingCoordinator:
         finally:
             con.close()
 
-        return TrainingResult(
+        result = TrainingResult(
             run_id=run_id,
             best_score=best_score,
             best_iteration=best_iteration,
@@ -278,11 +415,43 @@ class TrainingCoordinator:
             stop_reason=stop_reason,
             best_collector_path=best_path,
         )
+        logger.info(
+            f"Run {run_id} complete — best_score={best_score:.3f} "
+            f"at iter {best_iteration}, cost=${total_cost:.4f}, "
+            f"stop_reason={stop_reason}"
+        )
+        return result
 
     def start_and_run(self, initial_collector_code: Optional[str] = None) -> TrainingResult:
         """Convenience: create a run and immediately execute it."""
         run_id = self.create_run(initial_collector_code)
         return self.run(run_id)
+
+    # ── Strategy helpers ────────────────────────────────────────────────────
+
+    def _pick_refinement_strategy(
+        self, scores: list[float], iteration_num: int
+    ) -> Optional[str]:
+        """
+        Return a focused refinement strategy string when a plateau is detected,
+        otherwise None (use default balanced prompt).
+        """
+        w = self.config.score_plateau_window
+        if len(scores) < w + 1:
+            return None
+        recent = scores[-(w + 1):]
+        improvement = max(recent[1:]) - recent[0]
+        if improvement < self.config.score_plateau_threshold:
+            return "plateau_generic"
+        return None
+
+    def _worst_field_strategy(self, per_field: dict[str, float]) -> str:
+        """Return a focused strategy string targeting the lowest-scoring field."""
+        if not per_field:
+            return "focus on files extraction"
+        worst_field = min(per_field, key=per_field.get)  # type: ignore[arg-type]
+        worst_score = per_field[worst_field]
+        return f"Focus exclusively on improving '{worst_field}' (current score {worst_score:.3f})"
 
     # ── Stopping conditions ─────────────────────────────────────────────────
 

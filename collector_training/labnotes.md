@@ -3,6 +3,7 @@
 ## Table of Contents
 - [2026-03-19 — CmsGovCollector, Training Run 1: Initial Setup and POC](#2026-03-19--cmsgov-collector-training-run-1-initial-setup-and-poc)
 - [2026-03-21 — CmsGovCollector, Training Run 2: First Complete E2E](#2026-03-21--cmsgov-collector-training-run-2-first-complete-e2e)
+- [2026-03-22 — CmsGovCollector, Training Run 3: Expanded Dataset](#2026-03-22--cmsgov-collector-training-run-3-expanded-dataset)
 
 ---
 
@@ -92,3 +93,43 @@ The best version (v3) was automatically promoted to `collectors/CmsGovCollector.
 - The score plateau after 3 iterations suggests the training signal is weak — likely due to the small example set (8 examples) and noisy ground truth for `files`.
 - Iteration 5 scoring 0.000 (total crash) is a red flag — the refiner introduced a breaking change. Worth inspecting `CmsGovCollector_run2_v5.py` to see what broke.
 - To make further progress: more training examples, better ground truth for `files` (correct file names + hrefs), and possibly a higher `score_plateau_threshold` to run longer.
+
+---
+
+## 2026-03-22 — CmsGovCollector, Training Run 3: Expanded Dataset
+
+### Hypothesis
+Run 2 plateaued at 0.494 with only 8 training examples — too thin to give the refiner a reliable signal, especially for `files` (weight 3.0, stuck at 0.439). Expanding to ~30 examples from the Data Inventories sheet should provide a stronger gradient and improve generalization.
+
+### Data Source
+Google Sheets: [Data Inventories](https://docs.google.com/spreadsheets/d/1OYLn6NBWStOgPUTJfYpU0y0g4uY7roIPP4qC2YztgWY/edit?gid=864890349)
+- Sheet GID: `864890349`
+- Filter: `Data Added (Y/N/IP) = Y` with a DataLumos download link
+- ~30 new examples available beyond the 10 used in run 2
+
+### Ground Truth Scraping Refactor
+The original `scrape_datalumos=True` path used the authenticated **workspace editing interface** (`/datalumos/workspace?goToPath=...`), which requires being the project owner. Contributors' projects (mkraley, eksm, JB, etc.) are inaccessible this way.
+
+**New approach:** `read_project_public_view()` in `tests/compare_datalumos.py` scrapes the public `/project/{id}/version/V1/view` page via a standalone headless Playwright session — no credentials, works for any project.
+
+DOM pattern on the public view:
+- All metadata fields: `div.panel-heading` with `<strong>Label:</strong>` + help `<a>` + text
+- Files: `table.table-striped tbody tr` → `td a` for name and href
+- `_EXTRACT_PUBLIC_VIEW_JS` uses a generic `fieldMap` approach keyed on lowercased label text
+
+`importer.py`'s `_scrape_datalumos_project` simplified to 3 lines — no Args bootstrapping, no credentials.
+
+### Risks
+- **Ground truth quality:** run 1 showed some DataLumos workspaces had wrong or empty data; validate a sample before training
+- **Cloudflare:** public view pages pass the JS challenge in a real Playwright browser (headless Chromium with anti-detection flags); plain HTTP fetches are blocked
+- **Eval time:** ~9 min/iteration at 8 examples → potentially 30-40 min/iteration at 30+ examples
+- **Budget:** refinement prompts grow with more worst-case diffs; cap at `max_iterations=10`
+
+### Plan
+1. `start_training_run` — run 3, `max_iterations=10`, `max_cost_usd=10`
+2. `import_training_data` — sheet above, `status_column="Data Added (Y/N/IP)"`, `done_value="Y"`, `scrape_datalumos=True`
+3. Spot-check `files` ground truth on a sample before running
+4. Execute training loop
+
+### Results
+*(pending)*
