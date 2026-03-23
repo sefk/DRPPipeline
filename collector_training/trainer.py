@@ -364,14 +364,6 @@ class SimpleRefiner:
         """
         Call the AI model and return (improved_code, token_usage_dict).
         """
-        try:
-            import anthropic
-        except ImportError:
-            raise ImportError(
-                "anthropic package required for AI refinement. "
-                "Install with: pip install anthropic"
-            )
-
         prompt = build_refinement_prompt(
             collector_code=collector_code,
             aggregate_score=aggregate_score,
@@ -381,14 +373,12 @@ class SimpleRefiner:
             refinement_strategy=refinement_strategy,
         )
 
-        client = anthropic.Anthropic()
-        message = client.messages.create(
-            model=self.model,
-            max_tokens=16000,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        if self.model.startswith("gemini-"):
+            raw_text, input_tokens, output_tokens = self._call_gemini(prompt)
+        else:
+            raw_text, input_tokens, output_tokens = self._call_anthropic(prompt)
 
-        improved_code = message.content[0].text.strip()
+        improved_code = raw_text.strip()
         # Strip any accidental ``` fencing
         improved_code = re.sub(r"^```(?:python)?\s*\n?", "", improved_code)
         improved_code = re.sub(r"\n?```\s*$", "", improved_code)
@@ -401,20 +391,49 @@ class SimpleRefiner:
             import warnings
             warnings.warn(
                 f"Refiner output has syntax error (likely truncated at "
-                f"{message.usage.output_tokens} tokens) — keeping original code"
+                f"{output_tokens} tokens) — keeping original code"
             )
             improved_code = collector_code
 
         usage = {
-            "input_tokens":  message.usage.input_tokens,
-            "output_tokens": message.usage.output_tokens,
-            "cost_usd":      _compute_cost(
-                self.model,
-                message.usage.input_tokens,
-                message.usage.output_tokens,
-            ),
+            "input_tokens":  input_tokens,
+            "output_tokens": output_tokens,
+            "cost_usd":      _compute_cost(self.model, input_tokens, output_tokens),
         }
         return improved_code, usage
+
+    def _call_anthropic(self, prompt: str) -> tuple[str, int, int]:
+        import anthropic
+        client = anthropic.Anthropic()
+        message = client.messages.create(
+            model=self.model,
+            max_tokens=16000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return (
+            message.content[0].text,
+            message.usage.input_tokens,
+            message.usage.output_tokens,
+        )
+
+    def _call_gemini(self, prompt: str) -> tuple[str, int, int]:
+        import os
+        from openai import OpenAI
+        client = OpenAI(
+            api_key=os.environ["GOOGLE_API_KEY"],
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        )
+        response = client.chat.completions.create(
+            model=self.model,
+            max_tokens=16000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        usage = response.usage
+        return (
+            response.choices[0].message.content,
+            usage.prompt_tokens,
+            usage.completion_tokens,
+        )
 
 
 # ── Single iteration ────────────────────────────────────────────────────────
