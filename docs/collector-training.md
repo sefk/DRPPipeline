@@ -495,52 +495,95 @@ This means DSPy can learn:
 
 ### Motivation
 
-- **Cost**: Claude Opus/Sonnet are capable but expensive for iteration-heavy
-  workloads. Gemini 2.5 Flash or Claude Haiku may suffice for many steps.
-- **Budget**: Relying solely on Claude risks exhausting a personal token budget
-  during extended training runs.
-- **Diversity**: Different models may find different improvements. Running
-  parallel agents on different models and keeping the best result is a valid
-  strategy.
+- **Cost**: Claude Sonnet is capable but expensive for iteration-heavy
+  workloads. Gemini 2.5 Flash or Claude Haiku cost 5–20x less per token.
+- **Budget**: Relying solely on Sonnet risks exhausting a token budget
+  mid-run. Cheaper models can handle later iterations once the collector
+  stabilizes.
+- **Diversity**: Different models find different improvements. Running
+  comparison runs across models is a good way to identify the best
+  cost/quality tradeoff for a given collector.
 
-### Model roles
+### Supported backends
 
-Not every step in the loop needs the most capable model:
+`SimpleRefiner` routes to the right API based on model name prefix:
 
-| Step | Model tier | Rationale |
-|------|-----------|-----------|
-| Initial collector bootstrap | High (Opus/Sonnet) | Needs deep reasoning about site structure |
-| Evaluation (running collector) | None (pure Python) | No LLM needed |
-| Scoring | None (pure Python) | No LLM needed |
-| Gap analysis | Medium (Sonnet/Flash) | Pattern recognition, not code generation |
-| Code refinement | High (Opus/Sonnet) | Needs to write correct Python |
-| Simple field extraction fixes | Low (Haiku/Flash) | Small targeted edits |
+| Model name prefix | Backend | API key env var |
+|-------------------|---------|-----------------|
+| `claude-*` | Anthropic API | `ANTHROPIC_API_KEY` |
+| `gemini-*` | Google (OpenAI-compatible endpoint) | `GOOGLE_API_KEY` |
 
-### Implementation
+### Configured pricing
 
-The coordinator configures a model roster:
+Token costs are tracked automatically. Known models and their USD/1M token rates:
+
+| Model | Input | Output |
+|-------|-------|--------|
+| `claude-sonnet-4-6` | $3.00 | $15.00 |
+| `claude-haiku-4-5-20251001` | $0.80 | $4.00 |
+| `claude-opus-4-6` | $15.00 | $75.00 |
+| `gemini-2.5-flash` | $0.15 | $0.60 |
+| `gemini-2.5-pro` | $3.50 | $10.50 |
+
+Unknown models fall back to Sonnet pricing as a conservative estimate.
+
+### Choosing a model for a run
+
+Pass `model_refine` to `start_training_run`:
 
 ```python
-MODEL_CONFIG = {
-    "bootstrap": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
-    "analyze":   {"provider": "google",    "model": "gemini-2.5-flash"},
-    "refine":    {"provider": "anthropic", "model": "claude-sonnet-4-6"},
-}
+# Default — Sonnet for quality
+run_id = coord.create_run()  # uses TrainingConfig default: claude-sonnet-4-6
+
+# Budget run — Haiku (no extra setup needed)
+config = TrainingConfig(
+    collector_name="CmsGovCollector",
+    collector_module_name="cms_collector",
+    source_site="data.cms.gov",
+    model_refine="claude-haiku-4-5-20251001",
+)
+
+# Gemini run — requires GOOGLE_API_KEY
+config = TrainingConfig(
+    collector_name="CmsGovCollector",
+    collector_module_name="cms_collector",
+    source_site="data.cms.gov",
+    model_refine="gemini-2.5-flash",
+)
 ```
 
-DSPy natively supports multiple LM backends via `dspy.LM`:
+Or via the MCP tool:
+
+```
+start_training_run(
+    collector_name="CmsGovCollector",
+    collector_module_name="cms_collector",
+    source_site="data.cms.gov",
+    model_refine="gemini-2.5-flash",   # or "claude-haiku-4-5-20251001"
+)
+```
+
+### Automatic cost-based model switching
+
+The coordinator switches from `model_refine` to `cheap_model` once
+`switch_to_cheap_at_pct` of the budget is consumed (default 50%). Both
+fields accept any model name from the table above:
 
 ```python
-analyzer = dspy.LM("google/gemini-2.5-flash")
-refiner = dspy.LM("anthropic/claude-sonnet-4-6")
+config = TrainingConfig(
+    ...
+    model_refine="claude-sonnet-4-6",        # first half of budget
+    cheap_model="claude-haiku-4-5-20251001", # second half
+    switch_to_cheap_at_pct=0.50,
+)
 ```
 
 ### Adding a new model
 
-To add a model provider:
-1. Add the provider's API key to config
-2. Register it in `MODEL_CONFIG`
-3. DSPy handles the rest (prompt formatting, API calls, retries)
+1. Add its pricing to `_MODEL_PRICING` in `collector_training/trainer.py`
+2. If it uses a new API provider, add a `_call_<provider>` method to
+   `SimpleRefiner` and extend the routing logic in `refine()`
+3. Set the required API key env var
 
 ---
 
