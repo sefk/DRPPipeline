@@ -16,6 +16,8 @@ Flow:
          not exposed by any API endpoint)
 """
 
+import json
+import os
 from contextlib import suppress
 from datetime import date, datetime
 from pathlib import Path
@@ -134,13 +136,26 @@ class CmsGovCollector:
 
         # Collect files: all historical Primary files + ancillaries (once each)
         all_files = self._gather_files(drpid, current_uuid, taxonomy_uuid)
+        training_mode = bool(os.environ.get("DRP_TRAINING_MODE"))
+
         if not all_files:
             record_warning(drpid, "No files found to download")
+        elif training_mode:
+            # Training mode: write planned_files.json instead of downloading.
+            # Format matches _list_output_files: [{name, ...}]
+            planned = []
+            for r in all_files:
+                raw_name = r.get("file_name") or r.get("file_url", "").split("/")[-1].split("?")[0]
+                name = sanitize_filename(raw_name) if raw_name else "dataset"
+                planned.append({"name": name, "type": r.get("type", "")})
+            with open(folder_path / "planned_files.json", "w", encoding="utf-8") as fh:
+                json.dump(planned, fh, indent=2)
         else:
             self._download_files(drpid, all_files, folder_path)
 
-        # Also download dataset_metadata.json
-        self._download_dataset_metadata(drpid, current_uuid, folder_path)
+        # Also download dataset_metadata.json (skip in training mode)
+        if not training_mode:
+            self._download_dataset_metadata(drpid, current_uuid, folder_path)
 
         # Extract time_start / time_end from dataset metadata
         date_range = self._extract_date_range_from_metadata(slug_data, all_files, current_uuid)

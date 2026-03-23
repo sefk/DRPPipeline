@@ -273,10 +273,9 @@ def score_project(
         diff[field] = {"expected": g_val, "actual": c_val}
 
     # Apply failure-mode floors
-    folder_path = collector_output.get("folder_path")
     files = collector_output.get("files", [])
-    if not folder_path or not files:
-        # No files downloaded — cap aggregate at 0.2
+    if not files:
+        # No files at all (not even planned) — cap aggregate at 0.2
         field_scores["files"] = 0.0
         aggregate = min(0.2, _weighted_average(field_scores))
     elif field_scores["files"] < 0.1:

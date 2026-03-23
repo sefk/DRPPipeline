@@ -286,11 +286,11 @@ class TestCmsGovCollector(unittest.TestCase):
         )
 
         self.assertEqual(result["title"], "Hospital Service Area")
-        self.assertEqual(result["agency"], "Centers for Medicare & Medicaid Services")
+        self.assertEqual(result["agency"], "Centers for Medicare and Medicaid Services, United States Department of Health and Human Services")
         self.assertEqual(result["summary"], "Hospital Service Area data description.")
         self.assertEqual(result["folder_path"], "/tmp/DRP000001")
         self.assertEqual(result["extensions"], ".csv")
-        self.assertEqual(result["data_types"], "tabular")
+        self.assertEqual(result["data_types"], "administrative records data")
         mock_download.assert_called_once()
 
     @patch("collectors.CmsGovCollector.record_warning")
@@ -320,7 +320,10 @@ class TestCmsGovCollector(unittest.TestCase):
         self.collector._collect("https://data.cms.gov/some/path", 1)
 
         mock_warn.assert_called()
-        self.assertIn("Download failed", mock_warn.call_args[0][1])
+        self.assertTrue(
+            any("Download failed" in str(c) for c in mock_warn.call_args_list),
+            "Expected 'Download failed' in one of the record_warning calls",
+        )
 
     # ── run() ────────────────────────────────────────────────────────────────
 

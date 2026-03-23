@@ -133,6 +133,7 @@ class CollectorEvaluator:
 
     def _run_subprocess(self, drpid: int) -> tuple[int, str, str]:
         """Run the collector subprocess; return (returncode, stdout, stderr)."""
+        import os
         cmd = [
             sys.executable, str(PROJECT_ROOT / "main.py"),
             self.collector_module_name,
@@ -140,6 +141,7 @@ class CollectorEvaluator:
             "--num-rows", "1",
             "--start-drpid", str(drpid),
         ]
+        env = {**os.environ, "DRP_TRAINING_MODE": "1"}
         try:
             proc = subprocess.run(
                 cmd,
@@ -147,6 +149,7 @@ class CollectorEvaluator:
                 text=True,
                 timeout=self.subprocess_timeout,
                 cwd=str(PROJECT_ROOT),
+                env=env,
             )
             return proc.returncode, proc.stdout, proc.stderr
         except subprocess.TimeoutExpired:
@@ -187,9 +190,16 @@ class CollectorEvaluator:
                 error_message = stderr[:500] if stderr else f"returncode={returncode}"
             else:
                 collector_output = dict(record)
-                collector_output["files"] = self._list_output_files(
-                    record.get("folder_path")
+                folder_path_str = record.get("folder_path")
+                planned_json = (
+                    Path(folder_path_str) / "planned_files.json"
+                    if folder_path_str else None
                 )
+                if planned_json and planned_json.exists():
+                    with open(planned_json, encoding="utf-8") as fh:
+                        collector_output["files"] = json.load(fh)
+                else:
+                    collector_output["files"] = self._list_output_files(folder_path_str)
 
             scored = score_project(collector_output, ground_truth)
             return {
