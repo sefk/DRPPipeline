@@ -309,7 +309,12 @@ def read_project_public_view(project_id: str, headless: bool = True,
         context.set_default_timeout(timeout)
         page = context.new_page()
         try:
-            page.goto(url, wait_until="networkidle", timeout=timeout)
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            # Wait for the files table to appear before extracting
+            try:
+                page.wait_for_selector("table.table-striped", timeout=15000)
+            except Exception:
+                pass  # proceed anyway — some pages have no files table
             data = page.evaluate(_EXTRACT_PUBLIC_VIEW_JS)
             data["_project_id"] = project_id
             data["_url"] = url
