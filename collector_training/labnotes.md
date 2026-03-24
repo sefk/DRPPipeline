@@ -5,6 +5,7 @@
 - [2026-03-21 — CmsGovCollector, Training Run 2: First Complete E2E](#2026-03-21--cmsgov-collector-training-run-2-first-complete-e2e)
 - [2026-03-22 — CmsGovCollector, Training Run 3: Expanded Dataset](#2026-03-22--cmsgov-collector-training-run-3-expanded-dataset)
 - [2026-03-23 — CmsGovCollector, Training Runs 4–10: Bug Fixes and First Successful Iteration](#2026-03-23--cmsgov-collector-training-runs-410-bug-fixes-and-first-successful-iteration)
+- [2026-03-24 — CmsGovCollector, Training Runs 15–16: Haiku vs Gemini 2.5 Flash Cost/Quality Comparison](#2026-03-24--cmsgov-collector-training-runs-1516-haiku-vs-gemini-25-flash-costquality-comparison)
 
 ---
 
@@ -220,6 +221,34 @@ LLM-refined v2 pushed to **0.753**. Run was stopped before further iterations.
   the aggregate. Either the fallback logic needs improvement or these examples
   should be excluded from training.
 - Run 10 was stopped at iteration 2 — more iterations may improve further.
-- Haiku (run 13) and Gemini 2.5 Flash (run 14) comparison runs started in the
-  next session. Run 13 has 80/20 examples imported; run 14 needs data copied
-  from run 13 before `run_training_loop` can be called.
+
+---
+
+## 2026-03-24 — CmsGovCollector, Training Runs 15–16: Haiku vs Gemini 2.5 Flash Cost/Quality Comparison
+
+### Goal
+Compare cost and output quality between `claude-haiku-4-5-20251001` and
+`gemini-2.5-flash` as the refinement model, using an identical set of training
+examples so results are directly comparable.
+
+### Method
+- **Run 15** — `claude-haiku-4-5-20251001`, `max_iterations=10`, `max_cost_usd=$15`
+- **Run 16** — `gemini-2.5-flash`, `max_iterations=10`, `max_cost_usd=$15`
+- Both loops started in parallel as detached background subprocesses
+
+### Training Data
+- **Source:** Google Sheets [Data Inventories](https://docs.google.com/spreadsheets/d/1OYLn6NBWStOgPUTJfYpU0y0g4uY7roIPP4qC2YztgWY/edit?gid=864890349)
+  (sheet GID `864890349`, filter `Data Added (Y/N/IP) = Y`)
+- **Examples:** 30 total (24 training / 6 validation)
+- **Ground truth:** fresh DataLumos scrape via public project view (`scrape_datalumos=True`)
+- Run 15 was imported first; those exact 30 rows were SQL-copied into run 16
+  to guarantee identical datasets (no re-import, no divergence)
+- Note: runs 13 and 14 were also created for this comparison in a prior session
+  but were abandoned in favour of a clean-slate re-scrape
+
+### Results
+*(runs in progress — update once both complete)*
+
+### Logs
+- Run 15: `collector_training/logs/run_15.log`
+- Run 16: `collector_training/logs/run_16.log`
