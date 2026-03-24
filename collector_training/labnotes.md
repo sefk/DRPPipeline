@@ -201,8 +201,13 @@ LLM-refined v2 pushed to **0.753**. Run was stopped before further iterations.
 `collectors/CmsGovCollector.py` ← `CmsGovCollector_run10_v2.py` (score 0.753).
 
 ### Infrastructure Improvements
-- `run_training.py` now accepts `<run_id>` as a CLI argument and loads config
-  from the DB — can restart any run without editing the script
+- `run_training_loop` MCP tool added to `mcp_collector_dev/server.py` — spawns
+  the training coordinator as a detached background subprocess and returns
+  immediately with PID and log path. Preferred over running `run_training.py`
+  directly. Use `get_training_status` / `stop_training_run` to monitor/control.
+- `run_training.py` refactored to use the MCP interface: default CLI invocation
+  delegates to `run_training_loop`; `--execute` flag is the subprocess entry
+  point used internally by the MCP tool.
 - `SimpleRefiner` now supports multiple LLM backends: `claude-*` → Anthropic
   API, `gemini-*` → Google Generative Language API
 - Gemini auth supports both `GOOGLE_API_KEY` and service account credentials
@@ -215,5 +220,6 @@ LLM-refined v2 pushed to **0.753**. Run was stopped before further iterations.
   the aggregate. Either the fallback logic needs improvement or these examples
   should be excluded from training.
 - Run 10 was stopped at iteration 2 — more iterations may improve further.
-  Next session: resume or start a new run, and kick off Haiku / Gemini
-  comparison runs.
+- Haiku (run 13) and Gemini 2.5 Flash (run 14) comparison runs started in the
+  next session. Run 13 has 80/20 examples imported; run 14 needs data copied
+  from run 13 before `run_training_loop` can be called.

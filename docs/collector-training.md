@@ -17,7 +17,7 @@ training data and AI-driven refinement.
 - [Multi-Model Support](#multi-model-support)
 - [Cost Management](#cost-management)
 - [Database Schema](#database-schema)
-- [MCP Extensions](#mcp-extensions)
+- [MCP Interface](#mcp-interface)
 - [Parallel Agents](#parallel-agents)
 - [Observer Console](#observer-console)
 - [Risks and Future Work](#risks-and-future-work)
@@ -734,28 +734,58 @@ The database supports queries like:
 
 ---
 
-## MCP Extensions
+## MCP Interface
 
-The existing `drp-collector-dev` MCP server needs new tools to support the
-training workflow. These should be added to `mcp_collector_dev/server.py`.
+The `drp-collector-dev` MCP server (`mcp_collector_dev/server.py`) exposes the
+full training workflow as tools. All training operations should go through this
+interface rather than running Python scripts directly.
 
-### New tools
+### Training tools
 
 | Tool | Description |
 |------|-------------|
-| `import_training_data` | Fetch DONE rows from spreadsheet, scrape control DataLumos projects, store as training examples. Params: `sheet_name`, `run_id`, `max_rows`. |
-| `evaluate_collector` | Run a collector version against all training examples and compute scores. Params: `run_id`, `iteration_num`. Returns aggregate score and worst cases. |
-| `get_training_status` | Show current state of a training run: iteration count, best score, score trajectory, cost spent, running agents. |
+| `start_training_run` | Initialize a new training run with configuration (model, budget, max iterations). Returns `run_id`. |
+| `import_training_data` | Fetch rows from the Data Inventory spreadsheet and optionally scrape DataLumos for ground truth. Params: `run_id`, `sheet_id`, `sheet_gid`, `status_column`, `done_value`, `scrape_datalumos`. |
+| `run_training_loop` | **Launch the training loop in the background.** Spawns `run_training.py --execute` as a detached subprocess; returns immediately with PID and log path. Prerequisites: run must exist and have training examples imported. |
+| `evaluate_collector` | Run the current collector version against all training examples and score them. Params: `run_id`, `iteration_num` (0 = current file). Returns aggregate score and per-field breakdown. |
+| `get_training_status` | Show current state of a training run: iteration count, best score, score trajectory, cost spent. |
 | `get_iteration_details` | Show per-project scores, diffs, and field breakdown for a specific iteration. |
-| `start_training_run` | Initialize a new training run with configuration (model, budget, parallelism). Returns `run_id`. |
-| `stop_training_run` | Gracefully stop a running training session. Agents finish current iteration, then stop. |
+| `stop_training_run` | Gracefully stop a running training session. Sets a DB flag; the coordinator stops at the next iteration boundary. |
 
-### Extended existing tools
+### Typical workflow
 
-| Tool | Change |
-|------|--------|
-| `test_collector_on_project` | Add optional `return_raw=True` param that returns structured output (dict of extracted fields) instead of human-readable text. Needed for scoring. |
-| `scaffold_collector` | Add `from_version` param to scaffold from an existing iteration's code instead of the blank template. |
+```
+start_training_run(collector_name, collector_module_name, source_site, model_refine)
+  → returns run_id
+
+import_training_data(run_id, sheet_id, sheet_gid,
+                     status_column="Data Added (Y/N/IP)", done_value="Y",
+                     scrape_datalumos=True)
+  → imports and scores examples into the training DB
+
+run_training_loop(run_id)
+  → spawns coordinator in background, returns PID + log path
+
+get_training_status(run_id)          # monitor progress
+stop_training_run(run_id)            # stop early if needed
+```
+
+### `run_training.py` — CLI entry point
+
+`collector_training/run_training.py` provides a CLI equivalent that delegates
+to the same MCP interface:
+
+```bash
+# Background launch (delegates to run_training_loop, returns immediately):
+python collector_training/run_training.py <run_id>
+
+# Direct execution (used internally by run_training_loop's subprocess):
+python collector_training/run_training.py <run_id> --execute
+```
+
+Prefer the MCP interface over the CLI for all interactive and automated use.
+The `--execute` flag is an implementation detail used by the MCP tool's
+subprocess; it is not intended for direct use.
 
 ---
 
@@ -776,8 +806,10 @@ Start a training run for CmsGovCollector with gemini-2.5-flash, max 8 iterations
 and a $5 budget.
 ```
 
-Claude will call `start_training_run`, copy examples from the most recent run
-for the same collector, and launch the coordinator in the background.
+Claude will call `start_training_run`, then `import_training_data` to populate
+examples, then `run_training_loop` to launch the coordinator as a background
+process. The tool returns immediately with a PID and log path; use
+`get_training_status` to follow progress.
 
 ### Checking status
 

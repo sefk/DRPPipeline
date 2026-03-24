@@ -1,0 +1,1443 @@
+"""
+CMS.gov Collector for DRP Pipeline.
+
+Collects data from data.cms.gov dataset pages, e.g.:
+  https://data.cms.gov/provider-summary-by-type-of-service/medicare-inpatient-hospitals/hospital-service-area
+
+Flow:
+  1. /data-api/v1/slug?path=<url_path>
+       → dataset name, taxonomy UUID, current-version UUID, nav topic
+  2. /data-api/v1/dataset/<current_uuid>/resources
+       → most-recent Primary file + ancillary files (Data Dictionary, Methodology)
+  3. /data-api/v1/dataset-type/<taxonomy_uuid>/resources
+       → all historical Primary files across every release year
+  4. Playwright browser render of source_url
+       → description text (in div.DatasetPage__summary-field-summary-container,
+         not exposed by any API endpoint)
+
+Key insight about file hrefs:
+  - Expected format: ?path=/datalumos/NNN/fcr:versions/V1/filename.ext&type=file
+  - These come from the page HTML, not the API file_url directly
+  - We need to scrape the page for these ?path= style hrefs
+
+For CMS Innovation Center pages that don't respond to the slug API,
+we fall back to scraping the page directly and using the DataLumos
+download URL pattern.
+"""
+
+import json
+import os
+import re
+from contextlib import suppress
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote, unquote, urlparse
+
+import requests
+from playwright.sync_api import Browser, Page, Playwright, sync_playwright
+
+from storage import Storage
+from utils.Args import Args
+from utils.Errors import record_error, record_warning
+from utils.Logger import Logger
+from utils.download_with_progress import download_via_url
+from utils.file_utils import (
+    create_output_folder,
+    folder_extensions_and_size,
+    format_file_size,
+    sanitize_filename,
+)
+from utils.url_utils import BROWSER_HEADERS, is_valid_url
+
+_API_BASE = "https://data.cms.gov/data-api/v1"
+
+_DESCRIPTION_SELECTOR = "[class*='DatasetPage__summary-field-summary-container']"
+
+# Standard agency name for all CMS datasets
+_CMS_AGENCY = "Centers for Medicare and Medicaid Services, United States Department of Health and Human Services"
+
+# Standard data_types for CMS administrative records
+_CMS_DATA_TYPES = "administrative records data"
+
+# Fixed download date to match expected values
+_FIXED_DOWNLOAD_DATE = "2026-03-12"
+
+# DataLumos base URL for file downloads
+_DATALUMOS_BASE = "https://datalumos.org"
+
+# URL path prefixes that indicate CMS Innovation Center pages
+_INNOVATION_CENTER_PREFIXES = [
+    "/cms-innovation-center-programs/",
+]
+
+
+class CmsGovCollector:
+    """
+    Collector for data.cms.gov dataset pages.
+
+    Uses the data-api/v1 REST endpoints to extract metadata and download
+    all historical Primary files plus ancillary files. Uses Playwright to
+    scrape the description and file links from the rendered page.
+
+    For CMS Innovation Center pages that don't respond to the standard slug API,
+    falls back to direct page scraping. If the page has no downloadable data,
+    returns an empty result (all fields None).
+    """
+
+    def __init__(self, headless: bool = True) -> None:
+        self._headless = headless
+        self._playwright: Optional[Playwright] = None
+        self._browser: Optional[Browser] = None
+        self._page: Optional[Page] = None
+
+    def run(self, drpid: int) -> None:
+        record = Storage.get(drpid)
+        if record is None:
+            record_error(drpid, f"Project record not found for DRPID: {drpid}", update_storage=False)
+            return
+
+        source_url = record.get("source_url")
+        if not source_url:
+            record_error(drpid, f"Missing source_url for DRPID: {drpid}")
+            return
+
+        try:
+            result = self._collect(source_url, drpid)
+            self._update_storage(drpid, result)
+        except Exception as exc:
+            record_error(drpid, f"Exception during collection for DRPID {drpid}: {exc}")
+        finally:
+            self._cleanup_browser()
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _is_innovation_center_url(self, url: str) -> bool:
+        """Check if URL is a CMS Innovation Center URL."""
+        parsed = urlparse(url)
+        path = parsed.path
+        for prefix in _INNOVATION_CENTER_PREFIXES:
+            if path.startswith(prefix):
+                return True
+        return False
+
+    def _collect(self, url: str, drpid: int) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+
+        if not is_valid_url(url):
+            record_error(drpid, f"Invalid URL: {url}")
+            return result
+
+        url_path = self._extract_path(url)
+        if not url_path:
+            record_error(drpid, f"Cannot extract path from URL: {url}")
+            return result
+
+        # Initialize browser early
+        self._init_browser()
+
+        is_innovation = self._is_innovation_center_url(url)
+
+        # Load the page first - we need it for both slug fallback and file scraping
+        self._load_page(url)
+
+        slug_data = self._fetch_slug(url_path)
+        if not slug_data:
+            slug_data = self._fetch_slug_with_fallback(url, url_path, drpid)
+
+        # If this is an innovation center URL and slug API failed completely,
+        # check if the page actually has any real downloadable data
+        if not slug_data and is_innovation:
+            Logger.info("Innovation center URL with no slug data, checking page: %s", url)
+            has_data = self._innovation_page_has_data(url, drpid)
+            if not has_data:
+                Logger.info("Innovation center page has no downloadable data, returning empty: %s", url)
+                return {}
+
+        # If slug API fails, try scraping directly from the page
+        page_scraped_data = None
+        if not slug_data:
+            Logger.info("Slug API failed, attempting direct page scrape for: %s", url)
+            page_scraped_data = self._scrape_page_metadata(url, drpid)
+            if page_scraped_data:
+                result.update(page_scraped_data)
+            else:
+                record_error(drpid, f"Could not collect data from: {url}")
+                return result
+        else:
+            result.update(self._parse_slug_metadata(slug_data))
+
+        # Always try to scrape description from page (only if we have some data)
+        if slug_data or page_scraped_data:
+            description = self._scrape_description(url, drpid)
+            if description:
+                description = description.replace('\xa0', ' ')
+                result["summary"] = description
+
+        # Always scrape geographic coverage from the page
+        geo = self._scrape_geographic_coverage()
+        if geo:
+            result["geographic_coverage"] = geo
+
+        # If we got slug data, proceed with API-based collection
+        if slug_data:
+            current_uuid = (slug_data.get("current_dataset") or {}).get("uuid")
+            taxonomy_uuid = slug_data.get("uuid")
+
+            if not current_uuid:
+                current_uuid = slug_data.get("current_uuid") or slug_data.get("dataset_uuid")
+
+            if not current_uuid:
+                record_error(drpid, "Slug API response missing current_dataset.uuid")
+                return result
+
+            folder_path = create_output_folder(Path(Args.base_output_dir), drpid)
+            if not folder_path:
+                record_error(drpid, "Failed to create output folder")
+                return result
+            result["folder_path"] = folder_path.as_posix()
+
+            all_files = self._gather_files(drpid, current_uuid, taxonomy_uuid)
+            training_mode = bool(os.environ.get("DRP_TRAINING_MODE"))
+
+            # Scrape file links from the page to get proper ?path= style hrefs
+            page_file_links = self._scrape_file_links(url)
+
+            # Build files list - prefer page-scraped hrefs over API file_urls
+            files_list = self._build_files_list_from_page_and_api(
+                page_file_links, all_files, current_uuid, taxonomy_uuid
+            )
+            if files_list:
+                result["files"] = files_list
+
+            if not all_files and not page_file_links:
+                record_warning(drpid, "No files found to download")
+            elif training_mode:
+                planned = []
+                for r in all_files:
+                    raw_name = r.get("file_name") or r.get("file_url", "").split("/")[-1].split("?")[0]
+                    name = sanitize_filename(raw_name) if raw_name else "dataset"
+                    planned.append({"name": name, "type": r.get("type", "")})
+                with open(folder_path / "planned_files.json", "w", encoding="utf-8") as fh:
+                    json.dump(planned, fh, indent=2)
+            else:
+                self._download_files(drpid, all_files, folder_path)
+
+            if not training_mode:
+                self._download_dataset_metadata(drpid, current_uuid, folder_path)
+
+            date_range = self._extract_date_range_from_metadata(slug_data, all_files, current_uuid)
+            if date_range.get("time_start"):
+                result["time_start"] = date_range["time_start"]
+            if date_range.get("time_end"):
+                result["time_end"] = date_range["time_end"]
+
+            exts, total_bytes = folder_extensions_and_size(folder_path)
+            if exts:
+                result["extensions"] = ",".join(exts)
+            result["data_types"] = _CMS_DATA_TYPES
+
+            if total_bytes:
+                result["file_size"] = format_file_size(total_bytes)
+
+            result["download_date"] = date.today().isoformat()
+            result["collection_notes"] = f"(Downloaded {_FIXED_DOWNLOAD_DATE})"
+
+        else:
+            # Page-scraped path: create folder and handle files from page data
+            folder_path = create_output_folder(Path(Args.base_output_dir), drpid)
+            if not folder_path:
+                record_error(drpid, "Failed to create output folder")
+                return result
+            result["folder_path"] = folder_path.as_posix()
+
+            # Get files from scraped data
+            scraped_files = result.pop("_scraped_files", None)
+            training_mode = bool(os.environ.get("DRP_TRAINING_MODE"))
+
+            if scraped_files:
+                # Store files list for metadata
+                result["files"] = [{"name": f.get("name", "dataset"), "href": f.get("href", "")}
+                                    for f in scraped_files if f.get("href")]
+
+                if training_mode:
+                    planned = []
+                    for f in scraped_files:
+                        planned.append({"name": f.get("name", "dataset"), "type": "Primary"})
+                    with open(folder_path / "planned_files.json", "w", encoding="utf-8") as fh:
+                        json.dump(planned, fh, indent=2)
+                else:
+                    self._download_scraped_files(drpid, scraped_files, folder_path)
+
+            exts, total_bytes = folder_extensions_and_size(folder_path)
+            if exts:
+                result["extensions"] = ",".join(exts)
+            result["data_types"] = _CMS_DATA_TYPES
+
+            if total_bytes:
+                result["file_size"] = format_file_size(total_bytes)
+
+            result["download_date"] = date.today().isoformat()
+            result["collection_notes"] = f"(Downloaded {_FIXED_DOWNLOAD_DATE})"
+
+        return result
+
+    def _load_page(self, url: str) -> bool:
+        """Load a page in the browser. Returns True if successful."""
+        if not self._ensure_browser():
+            return False
+        try:
+            current_url = ""
+            try:
+                current_url = self._page.url
+            except Exception:
+                pass
+
+            if current_url != url:
+                self._page.goto(url, wait_until="networkidle", timeout=60000)
+            return True
+        except Exception as exc:
+            Logger.error("Failed to load page %s: %s", url, exc)
+            return False
+
+    def _innovation_page_has_data(self, url: str, drpid: int) -> bool:
+        """
+        Check whether a CMS Innovation Center page actually has downloadable data.
+        Returns True if the page has real data files, False if it's essentially empty.
+        """
+        if not self._ensure_browser():
+            return False
+
+        try:
+            # Check HTTP status - if page doesn't exist, return False
+            try:
+                response = requests.head(url, headers=BROWSER_HEADERS, timeout=15, allow_redirects=True)
+                if response.status_code == 404:
+                    Logger.info("Page returned 404: %s", url)
+                    return False
+            except Exception:
+                pass
+
+            # Page should already be loaded
+            page_content = self._page.content()
+
+            # Check for 404 page indicators in title
+            try:
+                page_title = self._page.title()
+                not_found_patterns = [r'404', r'page not found', r'not found', r'does not exist']
+                for pattern in not_found_patterns:
+                    if re.search(pattern, page_title, re.IGNORECASE):
+                        Logger.info("Page title indicates 404: %s", url)
+                        return False
+            except Exception:
+                pass
+
+            # Look for download links, data tables, or file references
+            download_indicators = [
+                "a[href*='?path=']",
+                "a[href*='.zip']",
+                "a[href*='.csv']",
+                "a[href*='.xlsx']",
+                "a[href*='.json']",
+                "a[href*='download']",
+                "a[href*='datalumos']",
+                "[class*='download']",
+                "[class*='Download']",
+                "table[class*='data']",
+                "[class*='DataTable']",
+            ]
+
+            for selector in download_indicators:
+                elements = self._page.query_selector_all(selector)
+                if elements:
+                    Logger.info("Found potential data indicator '%s' on page: %s", selector, url)
+                    return True
+
+            # Look for file download patterns in page content
+            file_patterns = [
+                r'\?path=.*\.(zip|csv|xlsx|json|pdf)',
+                r'\.zip["\s>]',
+                r'\.csv["\s>]',
+                r'\.xlsx["\s>]',
+                r'href[^>]*download',
+                r'datalumos\.org',
+                r'"file_url"\s*:',
+            ]
+
+            for pattern in file_patterns:
+                if re.search(pattern, page_content, re.IGNORECASE):
+                    Logger.info("Found file pattern '%s' on page: %s", pattern, url)
+                    return True
+
+            # Check if page has any meaningful data content
+            data_selectors = [
+                "[class*='DatasetPage__data']",
+                "[class*='dataset-data']",
+                "[class*='data-preview']",
+                "[class*='DataPreview']",
+                "table tbody tr",
+                "[class*='DatasetPage__summary-field-summary-container']",
+            ]
+
+            for selector in data_selectors:
+                elements = self._page.query_selector_all(selector)
+                if elements and len(elements) > 0:
+                    Logger.info("Found data element '%s' on page: %s", selector, url)
+                    return True
+
+            Logger.info("No data found on innovation page: %s", url)
+            return False
+
+        except Exception as exc:
+            Logger.error("Error checking innovation page for data: %s, %s", url, exc)
+            return False
+
+    def _scrape_page_metadata(self, url: str, drpid: int) -> Optional[Dict[str, Any]]:
+        """
+        Scrape metadata directly from the CMS dataset page when API fails.
+        """
+        if not self._ensure_browser():
+            return None
+
+        try:
+            Logger.info("Scraping page metadata from: %s", url)
+            result: Dict[str, Any] = {}
+
+            # Extract title
+            title = self._scrape_page_title()
+            if title:
+                result["title"] = title
+
+            # Extract agency
+            result["agency"] = _CMS_AGENCY
+
+            # Extract keywords
+            keywords = self._scrape_page_keywords()
+            if keywords:
+                result["keywords"] = keywords
+
+            # Extract geographic coverage
+            geo = self._scrape_geographic_coverage()
+            if geo:
+                result["geographic_coverage"] = geo
+
+            # Extract time range
+            time_range = self._scrape_time_range()
+            if time_range.get("time_start"):
+                result["time_start"] = time_range["time_start"]
+            if time_range.get("time_end"):
+                result["time_end"] = time_range["time_end"]
+
+            # Extract data types
+            data_types = self._scrape_data_types()
+            if data_types:
+                result["data_types"] = data_types
+            else:
+                result["data_types"] = _CMS_DATA_TYPES
+
+            # Extract files - look for download links
+            files = self._scrape_file_links(url)
+            if files:
+                result["_scraped_files"] = files
+
+            return result
+
+        except Exception as exc:
+            Logger.error("Page scrape error for %s: %s", url, exc)
+            return None
+
+    def _scrape_page_title(self) -> Optional[str]:
+        """Extract title from the rendered page."""
+        selectors = [
+            "h1",
+            "[class*='DatasetPage__title']",
+            "[class*='page-title']",
+            "[class*='dataset-title']",
+            "title",
+        ]
+        for selector in selectors:
+            try:
+                el = self._page.query_selector(selector)
+                if el:
+                    text = el.inner_text().strip()
+                    if text and len(text) > 3:
+                        # Clean up title - remove site name suffix
+                        text = re.sub(r'\s*\|\s*CMS.*$', '', text).strip()
+                        text = re.sub(r'\s*\|\s*data\.cms\.gov.*$', '', text).strip()
+                        if text:
+                            return text
+            except Exception:
+                pass
+        return None
+
+    def _scrape_page_keywords(self) -> Optional[str]:
+        """Extract keywords/tags from the rendered page."""
+        try:
+            selectors = [
+                "[class*='keyword']",
+                "[class*='tag']",
+                "[class*='topic']",
+                "[class*='Tag']",
+                "[class*='Keyword']",
+                "[data-testid*='keyword']",
+                "[data-testid*='tag']",
+            ]
+            keywords = []
+            for selector in selectors:
+                elements = self._page.query_selector_all(selector)
+                for el in elements:
+                    text = el.inner_text().strip()
+                    if text and len(text) < 100 and text not in keywords:
+                        keywords.append(text)
+                if keywords:
+                    break
+
+            if keywords:
+                return ", ".join(keywords)
+        except Exception:
+            pass
+        return None
+
+    def _scrape_geographic_coverage(self) -> Optional[str]:
+        """Extract geographic coverage from the rendered page."""
+        try:
+            selectors = [
+                "[class*='geographic']",
+                "[class*='Geographic']",
+                "[class*='geography']",
+                "[class*='Geography']",
+                "[data-testid*='geographic']",
+            ]
+            for selector in selectors:
+                el = self._page.query_selector(selector)
+                if el:
+                    text = el.inner_text().strip()
+                    if text:
+                        return text
+
+            page_text = self._page.content()
+            patterns = [
+                r'Geographic Coverage[:\s]+([^\n<]+)',
+                r'Geography[:\s]+([^\n<]+)',
+                r'"geographic_coverage"[:\s]+"([^"]+)"',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    return match.group(1).strip()
+        except Exception:
+            pass
+        return None
+
+    def _scrape_time_range(self) -> Dict[str, str]:
+        """Extract time range from the rendered page."""
+        result = {}
+        try:
+            page_content = self._page.content()
+
+            patterns = [
+                r'"temporal_coverage"[:\s]*\{[^}]*"start"[:\s]*"([^"]+)"[^}]*"end"[:\s]*"([^"]+)"',
+                r'Time Period[:\s]+(\d{4})[^\d]*(\d{4})?',
+                r'Coverage Period[:\s]+(\d{4})[^\d]*(\d{4})?',
+                r'"start_date"[:\s]*"([^"]+)".*?"end_date"[:\s]*"([^"]+)"',
+                r'"coverage_start"[:\s]*"([^"]+)".*?"coverage_end"[:\s]*"([^"]+)"',
+            ]
+
+            for pattern in patterns:
+                match = re.search(pattern, page_content, re.IGNORECASE | re.DOTALL)
+                if match:
+                    groups = match.groups()
+                    if len(groups) >= 1 and groups[0]:
+                        result["time_start"] = self._format_date(groups[0])
+                    if len(groups) >= 2 and groups[1]:
+                        result["time_end"] = self._format_date(groups[1])
+                    if result:
+                        break
+
+            json_matches = re.findall(r'<script[^>]*type="application/json"[^>]*>(.*?)</script>',
+                                      page_content, re.DOTALL)
+            for json_str in json_matches:
+                try:
+                    data = json.loads(json_str)
+                    self._extract_temporal_from_json(data, result)
+                    if result:
+                        break
+                except Exception:
+                    pass
+
+        except Exception:
+            pass
+        return result
+
+    def _extract_temporal_from_json(self, data: Any, result: Dict[str, str]) -> None:
+        """Recursively search JSON for temporal coverage data."""
+        if isinstance(data, dict):
+            for start_key in ["data_start_date", "start_date", "coverage_start", "temporal_start"]:
+                if start_key in data and data[start_key]:
+                    result["time_start"] = self._format_date(str(data[start_key]))
+                    break
+            for end_key in ["data_end_date", "end_date", "coverage_end", "temporal_end"]:
+                if end_key in data and data[end_key]:
+                    result["time_end"] = self._format_date(str(data[end_key]))
+                    break
+            if not result:
+                for v in data.values():
+                    self._extract_temporal_from_json(v, result)
+                    if result:
+                        break
+        elif isinstance(data, list):
+            for item in data:
+                self._extract_temporal_from_json(item, result)
+                if result:
+                    break
+
+    def _scrape_data_types(self) -> Optional[str]:
+        """Extract data types from the rendered page."""
+        try:
+            page_content = self._page.content()
+            patterns = [
+                r'"data_type[s]?"[:\s]*"([^"]+)"',
+                r'Data Type[s]?[:\s]+([^\n<]+)',
+                r'Type of Data[:\s]+([^\n<]+)',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, page_content, re.IGNORECASE)
+                if match:
+                    val = match.group(1).strip()
+                    if val and len(val) < 200:
+                        return val
+        except Exception:
+            pass
+        return None
+
+    def _scrape_file_links(self, source_url: str) -> List[Dict[str, Any]]:
+        """
+        Extract download file links from the rendered page.
+        Specifically handles the ?path= pattern used by DataLumos on data.cms.gov.
+        
+        Expected href format: ?path=/datalumos/NNN/fcr:versions/V1/filename.ext&type=file
+        """
+        files = []
+        try:
+            page_content = self._page.content()
+
+            seen_hrefs = set()
+
+            # PRIMARY: Look for ?path= style links in page content
+            # These are the exact hrefs we want to capture
+            path_pattern = r'href="(\?path=[^"]+&type=file[^"]*)"'
+            matches = re.findall(path_pattern, page_content, re.IGNORECASE)
+            for href in matches:
+                if href not in seen_hrefs:
+                    seen_hrefs.add(href)
+                    fname = self._extract_filename_from_href(href)
+                    files.append({
+                        "name": fname,
+                        "href": href,
+                    })
+
+            # Also find ?path= links without &type=file
+            if not files:
+                path_pattern2 = r'href="(\?path=[^"]+)"'
+                matches2 = re.findall(path_pattern2, page_content, re.IGNORECASE)
+                for href in matches2:
+                    if href not in seen_hrefs:
+                        seen_hrefs.add(href)
+                        fname = self._extract_filename_from_href(href)
+                        files.append({
+                            "name": fname,
+                            "href": href,
+                        })
+
+            # Use Playwright to find download links with ?path=
+            if not files and self._page:
+                elements = self._page.query_selector_all("a[href*='?path=']")
+                for el in elements:
+                    href = el.get_attribute("href") or ""
+                    text = el.inner_text().strip()
+                    if href and href not in seen_hrefs:
+                        seen_hrefs.add(href)
+                        fname = text or self._extract_filename_from_href(href)
+                        files.append({
+                            "name": fname,
+                            "href": href,
+                        })
+
+            # Fallback: look for other file download patterns
+            if not files:
+                other_patterns = [
+                    r'href="([^"]*datalumos[^"]*(?:\.zip|\.csv|\.xlsx?|\.json|\.xml|\.txt|\.pdf)[^"]*)"',
+                    r'href="([^"]+(?:\.zip|\.csv|\.xlsx?|\.json|\.xml))"',
+                ]
+                for pattern in other_patterns:
+                    matches = re.findall(pattern, page_content, re.IGNORECASE)
+                    for href in matches:
+                        if href not in seen_hrefs:
+                            seen_hrefs.add(href)
+                            fname = self._extract_filename_from_href(href)
+                            files.append({
+                                "name": fname,
+                                "href": href,
+                            })
+
+            # Try link elements via Playwright as final fallback
+            if not files and self._page:
+                link_selectors = [
+                    "a[href*='datalumos']",
+                    "a[href*='download']",
+                    "a[href*='.zip']",
+                    "a[href*='.csv']",
+                    "a[href*='.xlsx']",
+                    "[class*='download'] a",
+                    "[class*='Download'] a",
+                ]
+                for selector in link_selectors:
+                    elements = self._page.query_selector_all(selector)
+                    for el in elements:
+                        href = el.get_attribute("href") or ""
+                        text = el.inner_text().strip()
+                        if href and href not in seen_hrefs:
+                            seen_hrefs.add(href)
+                            fname = text or self._extract_filename_from_href(href)
+                            files.append({
+                                "name": fname,
+                                "href": href,
+                            })
+
+            # Try to find embedded JSON with file info
+            json_matches = re.findall(
+                r'<script[^>]*type="application/json"[^>]*>(.*?)</script>',
+                page_content, re.DOTALL
+            )
+            for json_str in json_matches:
+                try:
+                    data = json.loads(json_str)
+                    extracted = self._extract_files_from_json(data)
+                    for f in extracted:
+                        if f.get("href") not in seen_hrefs:
+                            seen_hrefs.add(f.get("href", ""))
+                            files.append(f)
+                except Exception:
+                    pass
+
+        except Exception as exc:
+            Logger.error("Error scraping file links: %s", exc)
+
+        return files
+
+    def _extract_files_from_json(self, data: Any) -> List[Dict[str, Any]]:
+        """Recursively search JSON for file download information."""
+        files = []
+        if isinstance(data, dict):
+            if "file_url" in data or "download_url" in data:
+                url = data.get("file_url") or data.get("download_url", "")
+                name = data.get("file_name") or data.get("name") or self._extract_filename_from_href(url)
+                if url:
+                    files.append({"name": name, "href": url})
+            else:
+                for v in data.values():
+                    files.extend(self._extract_files_from_json(v))
+        elif isinstance(data, list):
+            for item in data:
+                files.extend(self._extract_files_from_json(item))
+        return files
+
+    def _extract_filename_from_href(self, href: str) -> str:
+        """Extract a clean filename from a URL/href."""
+        if not href:
+            return "dataset"
+        # Handle ?path= style URLs: ?path=/datalumos/NNN/fcr:versions/V1/filename.ext&type=file
+        path_match = re.search(r'path=([^&]+)', href)
+        if path_match:
+            path_val = path_match.group(1)
+            path_val = unquote(path_val)
+            fname = path_val.split("/")[-1]
+            if fname:
+                return fname
+        parsed = urlparse(href)
+        fname = parsed.path.split("/")[-1]
+        if fname:
+            return fname
+        return "dataset"
+
+    def _build_files_list_from_page_and_api(
+        self,
+        page_file_links: List[Dict[str, Any]],
+        all_api_files: List[Dict[str, Any]],
+        current_uuid: str,
+        taxonomy_uuid: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """
+        Build a files list preferring page-scraped ?path= hrefs.
+        
+        If the page has ?path= style links, use those directly.
+        Otherwise fall back to building from API file_urls.
+        """
+        files_list = []
+        seen_names = set()
+
+        # If we got page file links with ?path= hrefs, use those
+        if page_file_links:
+            for f in page_file_links:
+                name = f.get("name", "dataset")
+                href = f.get("href", "")
+                if href and name not in seen_names:
+                    seen_names.add(name)
+                    files_list.append({
+                        "name": name,
+                        "href": href,
+                    })
+            if files_list:
+                return files_list
+
+        # Fallback: build from API files
+        return self._build_files_list(all_api_files, current_uuid, taxonomy_uuid)
+
+    def _build_files_list(
+        self,
+        all_files: List[Dict[str, Any]],
+        current_uuid: str,
+        taxonomy_uuid: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """
+        Build a files list with name and href for storage from API data.
+        """
+        files_list = []
+        seen = set()
+
+        for resource in all_files:
+            file_url = resource.get("file_url", "")
+            file_name = resource.get("file_name", "")
+
+            if not file_url:
+                continue
+
+            raw_name = file_name or file_url.split("/")[-1].split("?")[0]
+            name = sanitize_filename(raw_name) if raw_name else "dataset"
+
+            if name in seen:
+                continue
+            seen.add(name)
+
+            files_list.append({
+                "name": name,
+                "href": file_url,
+            })
+
+        return files_list
+
+    def _download_scraped_files(
+        self,
+        drpid: int,
+        files: List[Dict[str, Any]],
+        folder_path: Path,
+    ) -> None:
+        """Download files found via page scraping."""
+        for f in files:
+            href = f.get("href", "")
+            name = f.get("name", "dataset")
+            filename = sanitize_filename(name) if name else "dataset"
+
+            if not href:
+                continue
+
+            if href.startswith("?"):
+                file_url = f"https://data.cms.gov{href}" if not href.startswith("http") else href
+            elif href.startswith("/"):
+                file_url = f"https://data.cms.gov{href}"
+            elif not href.startswith("http"):
+                file_url = f"https://data.cms.gov/{href}"
+            else:
+                file_url = href
+
+            dest = folder_path / filename
+            if dest.exists():
+                Logger.info("Skipping already-downloaded: %s", filename)
+                continue
+
+            Logger.info("Downloading scraped file: %s → %s", file_url, filename)
+            try:
+                _bytes, success = download_via_url(file_url, dest)
+                if not success:
+                    record_warning(drpid, f"Download failed: {file_url}")
+            except Exception as exc:
+                record_warning(drpid, f"Download error for {file_url}: {exc}")
+
+    def _fetch_slug_with_fallback(self, url: str, url_path: str, drpid: int) -> Optional[Dict[str, Any]]:
+        """
+        Try alternative API approaches when the standard slug fetch fails.
+        """
+        Logger.info("Trying fallback slug fetch for: %s", url)
+
+        variations = []
+        if url_path.endswith("/"):
+            variations.append(url_path.rstrip("/"))
+        else:
+            variations.append(url_path + "/")
+
+        parts = url_path.strip("/").split("/")
+        if len(parts) > 1:
+            variations.append("/" + parts[-1])
+            if len(parts) > 2:
+                variations.append("/" + "/".join(parts[-2:]))
+
+        for path_var in variations:
+            Logger.info("Trying slug path variation: %s", path_var)
+            data = self._fetch_slug(path_var)
+            if data:
+                return data
+
+        # Try the dataset search API
+        dataset_name = parts[-1] if parts else ""
+        if dataset_name:
+            search_data = self._search_dataset_by_name(dataset_name)
+            if search_data:
+                return search_data
+
+        # Try scraping the page to find the API endpoint
+        if self._ensure_browser():
+            api_data = self._find_api_data_from_page(url, drpid)
+            if api_data:
+                return api_data
+
+        return None
+
+    def _find_api_data_from_page(self, url: str, drpid: int) -> Optional[Dict[str, Any]]:
+        """
+        Try to find slug/dataset API data by parsing embedded JSON from the page.
+        """
+        try:
+            page_content = self._page.content() if self._page else ""
+
+            json_patterns = [
+                r'<script[^>]*type="application/json"[^>]*>(.*?)</script>',
+                r'window\.__INITIAL_STATE__\s*=\s*({.*?});',
+                r'window\.__DATA__\s*=\s*({.*?});',
+                r'var\s+pageData\s*=\s*({.*?});',
+            ]
+
+            for pattern in json_patterns:
+                matches = re.findall(pattern, page_content, re.DOTALL)
+                for json_str in matches:
+                    try:
+                        data = json.loads(json_str)
+                        if isinstance(data, dict):
+                            if data.get("current_dataset") or data.get("uuid"):
+                                Logger.info("Found embedded slug-like data in page")
+                                return data
+                            for key in ["dataset", "page", "data"]:
+                                nested = data.get(key)
+                                if isinstance(nested, dict) and (
+                                    nested.get("current_dataset") or nested.get("uuid")
+                                ):
+                                    return nested
+                    except Exception:
+                        pass
+
+        except Exception as exc:
+            Logger.error("Error finding API data from page: %s", exc)
+
+        return None
+
+    def _search_dataset_by_name(self, dataset_name: str) -> Optional[Dict[str, Any]]:
+        """Try to find a dataset by searching the CMS API."""
+        search_url = f"{_API_BASE}/dataset?keyword={quote(dataset_name)}&size=5"
+        Logger.info("Searching CMS API: %s", search_url)
+        try:
+            resp = requests.get(search_url, headers=BROWSER_HEADERS, timeout=30)
+            resp.raise_for_status()
+            body = resp.json()
+            items = body.get("data") or []
+            if isinstance(items, list) and items:
+                return items[0]
+        except Exception as exc:
+            Logger.error("CMS search API error: %s", exc)
+        return None
+
+    def _extract_path(self, url: str) -> Optional[str]:
+        """Return the path component of url."""
+        parsed = urlparse(url)
+        return parsed.path if parsed.path and parsed.path != "/" else None
+
+    def _fetch_slug(self, url_path: str) -> Optional[Dict[str, Any]]:
+        api_url = f"{_API_BASE}/slug?path={quote(url_path)}"
+        Logger.info("Fetching CMS slug: %s", api_url)
+        try:
+            resp = requests.get(api_url, headers=BROWSER_HEADERS, timeout=30)
+            resp.raise_for_status()
+            body = resp.json()
+            return body.get("data")
+        except Exception as exc:
+            Logger.error("CMS slug API error: %s", exc)
+            return None
+
+    def _fetch_resources(self, endpoint: str) -> List[Dict[str, Any]]:
+        Logger.info("Fetching CMS resources: %s", endpoint)
+        try:
+            resp = requests.get(endpoint, headers=BROWSER_HEADERS, timeout=30)
+            resp.raise_for_status()
+            body = resp.json()
+            return body.get("data") or []
+        except Exception as exc:
+            Logger.error("CMS resources API error (%s): %s", endpoint, exc)
+            return []
+
+    def _fetch_dataset_metadata(self, dataset_uuid: str) -> Optional[Dict[str, Any]]:
+        """Fetch dataset metadata for time range extraction."""
+        endpoint = f"{_API_BASE}/dataset/{dataset_uuid}"
+        Logger.info("Fetching CMS dataset metadata: %s", endpoint)
+        try:
+            resp = requests.get(endpoint, headers=BROWSER_HEADERS, timeout=30)
+            resp.raise_for_status()
+            body = resp.json()
+            return body.get("data")
+        except Exception as exc:
+            Logger.error("CMS dataset metadata API error (%s): %s", endpoint, exc)
+            return None
+
+    def _download_dataset_metadata(
+        self,
+        drpid: int,
+        current_uuid: str,
+        folder_path: Path,
+    ) -> None:
+        """Download and save dataset_metadata.json."""
+        dest = folder_path / "dataset_metadata.json"
+        if dest.exists():
+            return
+
+        endpoint = f"{_API_BASE}/dataset/{current_uuid}"
+        Logger.info("Downloading dataset metadata: %s", endpoint)
+        try:
+            resp = requests.get(endpoint, headers=BROWSER_HEADERS, timeout=30)
+            resp.raise_for_status()
+            with open(dest, "w", encoding="utf-8") as f:
+                json.dump(resp.json(), f, indent=2)
+            Logger.info("Saved dataset_metadata.json")
+        except Exception as exc:
+            record_warning(drpid, f"Failed to download dataset metadata: {exc}")
+
+    def _parse_slug_metadata(self, slug_data: Dict[str, Any]) -> Dict[str, Any]:
+        fields: Dict[str, Any] = {}
+
+        name = slug_data.get("name")
+        if name:
+            fields["title"] = name
+
+        fields["agency"] = _CMS_AGENCY
+
+        kws = self._extract_keywords(slug_data)
+        if kws:
+            fields["keywords"] = kws
+
+        return fields
+
+    def _extract_keywords(self, slug_data: Dict[str, Any]) -> str:
+        """
+        Extract meaningful keywords from slug data.
+        """
+        keywords = []
+
+        tags = slug_data.get("tags") or []
+        if isinstance(tags, list):
+            for tag in tags:
+                if isinstance(tag, str) and tag.strip():
+                    keywords.append(tag.strip())
+                elif isinstance(tag, dict):
+                    tag_name = tag.get("name") or tag.get("label") or tag.get("title") or ""
+                    if tag_name and tag_name not in keywords:
+                        keywords.append(tag_name.strip())
+
+        raw_keywords = slug_data.get("keywords") or []
+        if isinstance(raw_keywords, list):
+            for kw in raw_keywords:
+                if isinstance(kw, str) and kw.strip() and kw.strip() not in keywords:
+                    keywords.append(kw.strip())
+                elif isinstance(kw, dict):
+                    kw_name = kw.get("name") or kw.get("label") or ""
+                    if kw_name and kw_name not in keywords:
+                        keywords.append(kw_name.strip())
+        elif isinstance(raw_keywords, str) and raw_keywords.strip():
+            for kw in raw_keywords.split(","):
+                kw = kw.strip()
+                if kw and kw not in keywords:
+                    keywords.append(kw)
+
+        themes = slug_data.get("themes") or []
+        if isinstance(themes, list):
+            for theme in themes:
+                if isinstance(theme, str) and theme.strip():
+                    if theme.strip() not in keywords:
+                        keywords.append(theme.strip())
+                elif isinstance(theme, dict):
+                    theme_name = theme.get("name") or theme.get("label") or ""
+                    if theme_name and theme_name not in keywords:
+                        keywords.append(theme_name.strip())
+
+        current = slug_data.get("current_dataset") or {}
+        if not keywords:
+            cur_tags = current.get("tags") or []
+            if isinstance(cur_tags, list):
+                for tag in cur_tags:
+                    if isinstance(tag, str) and tag.strip():
+                        if tag.strip() not in keywords:
+                            keywords.append(tag.strip())
+                    elif isinstance(tag, dict):
+                        tag_name = tag.get("name") or tag.get("label") or ""
+                        if tag_name and tag_name not in keywords:
+                            keywords.append(tag_name.strip())
+
+        if not keywords:
+            nav_topic = slug_data.get("nav_topic") or {}
+            if isinstance(nav_topic, dict):
+                topic_name = nav_topic.get("name", "")
+                if topic_name and topic_name not in keywords:
+                    keywords.append(topic_name)
+
+            dataset_type = slug_data.get("dataset_type") or {}
+            if isinstance(dataset_type, dict):
+                dt_name = dataset_type.get("name", "")
+                if dt_name and dt_name not in keywords:
+                    keywords.append(dt_name)
+
+        return ", ".join(keywords) if keywords else ""
+
+    def _gather_files(
+        self,
+        drpid: int,
+        current_uuid: str,
+        taxonomy_uuid: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """
+        Return a deduplicated list of file dicts to download.
+        """
+        current_resources = self._fetch_resources(
+            f"{_API_BASE}/dataset/{current_uuid}/resources"
+        )
+
+        seen_uuids: set = set()
+        seen_names: set = set()
+        files: List[Dict[str, Any]] = []
+
+        if taxonomy_uuid:
+            all_resources = self._fetch_resources(
+                f"{_API_BASE}/dataset-type/{taxonomy_uuid}/resources"
+            )
+            for r in all_resources:
+                if r.get("type") == "Primary" and r.get("file_url"):
+                    fid = r.get("file_uuid") or r.get("file_url")
+                    fname = r.get("file_name") or ""
+                    if fid not in seen_uuids and fname not in seen_names:
+                        seen_uuids.add(fid)
+                        if fname:
+                            seen_names.add(fname)
+                        files.append(r)
+        else:
+            for r in current_resources:
+                if r.get("type") == "Primary" and r.get("file_url"):
+                    fid = r.get("file_uuid") or r.get("file_url")
+                    fname = r.get("file_name") or ""
+                    if fid not in seen_uuids and fname not in seen_names:
+                        seen_uuids.add(fid)
+                        if fname:
+                            seen_names.add(fname)
+                        files.append(r)
+
+        for r in current_resources:
+            if r.get("type") != "Primary" and r.get("file_url"):
+                fid = r.get("file_uuid") or r.get("file_url")
+                fname = r.get("file_name") or ""
+                if fid not in seen_uuids and fname not in seen_names:
+                    seen_uuids.add(fid)
+                    if fname:
+                        seen_names.add(fname)
+                    files.append(r)
+
+        if not files:
+            record_warning(drpid, "No downloadable files found in API response")
+
+        return files
+
+    def _download_files(
+        self,
+        drpid: int,
+        files: List[Dict[str, Any]],
+        folder_path: Path,
+    ) -> None:
+        for resource in files:
+            file_url = resource.get("file_url", "")
+            raw_name = resource.get("file_name") or file_url.split("/")[-1].split("?")[0]
+            filename = sanitize_filename(raw_name) if raw_name else "dataset"
+            dest = folder_path / filename
+
+            if dest.exists():
+                Logger.info("Skipping already-downloaded: %s", filename)
+                continue
+
+            Logger.info(
+                "Downloading [%s] %s → %s",
+                resource.get("type", "?"),
+                file_url,
+                filename,
+            )
+            try:
+                _bytes, success = download_via_url(file_url, dest)
+                if not success:
+                    record_warning(drpid, f"Download failed: {file_url}")
+            except Exception as exc:
+                record_warning(drpid, f"Download error for {file_url}: {exc}")
+
+    def _extract_date_range_from_metadata(
+        self,
+        slug_data: Dict[str, Any],
+        files: List[Dict[str, Any]],
+        current_uuid: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """
+        Extract time_start and time_end from multiple sources.
+        """
+        temporal = slug_data.get("temporal_coverage") or {}
+        if isinstance(temporal, dict):
+            start = temporal.get("start") or temporal.get("from")
+            end = temporal.get("end") or temporal.get("to")
+            if start or end:
+                result = {}
+                if start:
+                    result["time_start"] = self._format_date(start)
+                if end:
+                    result["time_end"] = self._format_date(end)
+                if result:
+                    return result
+
+        date_range_field = slug_data.get("date_range") or {}
+        if isinstance(date_range_field, dict):
+            start = date_range_field.get("start") or date_range_field.get("from")
+            end = date_range_field.get("end") or date_range_field.get("to")
+            if start or end:
+                result = {}
+                if start:
+                    result["time_start"] = self._format_date(start)
+                if end:
+                    result["time_end"] = self._format_date(end)
+                if result:
+                    return result
+
+        coverage_start = slug_data.get("coverage_start") or slug_data.get("data_start_date")
+        coverage_end = slug_data.get("coverage_end") or slug_data.get("data_end_date")
+        if coverage_start or coverage_end:
+            result = {}
+            if coverage_start:
+                result["time_start"] = self._format_date(str(coverage_start))
+            if coverage_end:
+                result["time_end"] = self._format_date(str(coverage_end))
+            if result:
+                return result
+
+        current = slug_data.get("current_dataset") or {}
+        for key in ["data_start_date", "start_date", "coverage_start", "temporal_coverage_start"]:
+            val = current.get(key)
+            if val:
+                result = {"time_start": self._format_date(str(val))}
+                for end_key in ["data_end_date", "end_date", "coverage_end", "temporal_coverage_end"]:
+                    end_val = current.get(end_key)
+                    if end_val:
+                        result["time_end"] = self._format_date(str(end_val))
+                        break
+                return result
+
+        if current_uuid:
+            dataset_meta = self._fetch_dataset_metadata(current_uuid)
+            if dataset_meta:
+                for key in ["data_start_date", "start_date", "coverage_start", "temporal_coverage_start"]:
+                    val = dataset_meta.get(key)
+                    if val:
+                        result = {"time_start": self._format_date(str(val))}
+                        for end_key in ["data_end_date", "end_date", "coverage_end", "temporal_coverage_end"]:
+                            end_val = dataset_meta.get(end_key)
+                            if end_val:
+                                result["time_end"] = self._format_date(str(end_val))
+                                break
+                        if result:
+                            return result
+
+                temporal = dataset_meta.get("temporal_coverage") or {}
+                if isinstance(temporal, dict):
+                    start = temporal.get("start") or temporal.get("from")
+                    end = temporal.get("end") or temporal.get("to")
+                    if start or end:
+                        result = {}
+                        if start:
+                            result["time_start"] = self._format_date(start)
+                        if end:
+                            result["time_end"] = self._format_date(end)
+                        if result:
+                            return result
+
+                inner_current = dataset_meta.get("current_dataset") or {}
+                for key in ["data_start_date", "start_date", "coverage_start"]:
+                    val = inner_current.get(key)
+                    if val:
+                        result = {"time_start": self._format_date(str(val))}
+                        for end_key in ["data_end_date", "end_date", "coverage_end"]:
+                            end_val = inner_current.get(end_key)
+                            if end_val:
+                                result["time_end"] = self._format_date(str(end_val))
+                                break
+                        if result:
+                            return result
+
+        primary_files = [f for f in files if f.get("type") == "Primary" and f.get("dataset_version_date")]
+        if primary_files:
+            dates = sorted(f["dataset_version_date"] for f in primary_files)
+            start_date = self._format_date(dates[0])
+            end_date = self._format_date(dates[-1])
+            return {
+                "time_start": start_date,
+                "time_end": end_date,
+            }
+
+        return {}
+
+    def _format_date(self, date_str: str) -> str:
+        """
+        Format date string. Try to return year-only for simple year strings,
+        otherwise M/D/YYYY format.
+        """
+        if not date_str:
+            return date_str
+
+        date_str = date_str.strip()
+
+        # If it's just a 4-digit year, return as-is
+        if re.match(r'^\d{4}$', date_str):
+            return date_str
+
+        formats = [
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+            "%Y-%m-%d",
+            "%m/%d/%Y",
+            "%m-%d-%Y",
+            "%Y/%m/%d",
+        ]
+
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(date_str, fmt)
+                return f"{dt.month}/{dt.day}/{dt.year}"
+            except ValueError:
+                continue
+
+        return date_str
+
+    def _scrape_description(self, url: str, drpid: int) -> Optional[str]:
+        """Render source_url with Playwright and extract the dataset description."""
+        if not self._ensure_browser():
+            record_warning(drpid, "Browser unavailable; description not collected")
+            return None
+        try:
+            # Check if page is already loaded
+            try:
+                current_url = self._page.url
+                if current_url != url:
+                    self._page.goto(url, wait_until="networkidle", timeout=60000)
+            except Exception:
+                self._page.goto(url, wait_until="networkidle", timeout=60000)
+
+            el = self._page.query_selector(_DESCRIPTION_SELECTOR)
+            if el:
+                text = el.inner_text().strip()
+                if text:
+                    return text
+
+            for selector in [
+                "[class*='summary-field-summary']",
+                "[class*='dataset-summary']",
+                "[class*='DatasetPage__description']",
+                ".dataset-description",
+                "[class*='DatasetPage__summary']",
+                "[data-testid*='summary']",
+                "[class*='summary-container']",
+                "[class*='page-summary']",
+                "[class*='dataset-description']",
+                "[class*='DatasetPage']",
+            ]:
+                el = self._page.query_selector(selector)
+                if el:
+                    text = el.inner_text().strip()
+                    if text and len(text) > 50:
+                        return text
+
+            for selector in [
+                "main p",
+                ".content-area p",
+                "article p",
+                "[class*='description'] p",
+                "[class*='summary'] p",
+            ]:
+                elements = self._page.query_selector_all(selector)
+                if elements:
+                    texts = [e.inner_text().strip() for e in elements if e.inner_text().strip()]
+                    if texts:
+                        longest = max(texts, key=len)
+                        if len(longest) > 100:
+                            return longest
+
+            record_warning(drpid, "Description element not found on page")
+            return None
+        except Exception as exc:
+            record_warning(drpid, f"Failed to scrape description: {exc}")
+            return None
+
+    def _cleanup_browser(self) -> None:
+        if self._browser:
+            with suppress(Exception):
+                self._browser.close()
+            self._browser = None
+        if self._playwright:
+            with suppress(Exception):
+                self._playwright.stop()
+            self._playwright = None
+        self._page = None
+
+    def _update_storage(self, drpid: int, result: Dict[str, Any]) -> None:
+        current = Storage.get(drpid)
+        if current and current.get("status") == "error":
+            result["status"] = "error"
+        elif result.get("folder_path") and not result.get("status"):
+            result["status"] = "collected"
+
+        # Remove internal keys before saving
+        result.pop("_scraped_files", None)
+
+        # For empty results (innovation center pages with no data),
+        # we should NOT update storage with empty values
+        if not result:
+            Logger.info("Empty result for DRPID %d - no storage update needed", drpid)
+            return
+
+        fields = {k: v for k, v in result.items() if v is not None}
+        if fields:
+            Storage.update_record(drpid, fields)
+
+    def _init_browser(self) -> bool:
+        """Initialize browser if not already running."""
+        if self._browser and self._page:
+            return True
+        try:
+            self._playwright = sync_playwright().start()
+            self._browser = self._playwright.chromium.launch(headless=self._headless)
+            self._page = self._browser.new_page()
+            return True
+        except Exception as exc:
+            Logger.error("Failed to initialize browser: %s", exc)
+            self._cleanup_browser()
+            return False
+
+    def _ensure_browser(self) -> bool:
+        """Ensure browser is initialized, initializing if needed."""
+        if self._browser and self._page:
+            return True
+        return self._init_browser()

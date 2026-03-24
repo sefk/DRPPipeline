@@ -959,6 +959,75 @@ def get_iteration_details(run_id: int, iteration_num: int) -> str:
 
 
 @mcp.tool()
+def run_training_loop(run_id: int) -> str:
+    """
+    Start the training loop for an existing run in the background.
+
+    Returns immediately. Training runs as a detached subprocess and writes
+    progress to collector_training/logs/run_{run_id}.log.
+
+    Prerequisites:
+      - Training run must exist (created via start_training_run)
+      - Training examples must be imported (via import_training_data)
+
+    Monitor progress : get_training_status(run_id)
+    Stop early       : stop_training_run(run_id)
+    """
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT))
+        from collector_training.schema import get_connection
+
+        db = _get_training_db()
+        con = get_connection(db)
+        try:
+            run_row = con.execute(
+                "SELECT status FROM training_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if not run_row:
+                return f"Error: run {run_id} not found."
+            if run_row["status"] == "stopped":
+                return f"Error: run {run_id} is already stopped. Create a new run to train again."
+            if run_row["status"] == "completed":
+                return f"Error: run {run_id} already completed. Create a new run to train again."
+            n_train = con.execute(
+                "SELECT COUNT(*) FROM training_examples WHERE run_id=? AND is_validation=0",
+                (run_id,),
+            ).fetchone()[0]
+        finally:
+            con.close()
+
+        if n_train == 0:
+            return (
+                f"Error: run {run_id} has no training examples. "
+                "Call import_training_data first."
+            )
+
+        log_dir = PROJECT_ROOT / "collector_training" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"run_{run_id}.log"
+        script = PROJECT_ROOT / "collector_training" / "run_training.py"
+
+        with open(log_path, "a") as log_fh:
+            proc = subprocess.Popen(
+                [sys.executable, str(script), str(run_id), "--execute"],
+                stdout=log_fh,
+                stderr=log_fh,
+                cwd=str(PROJECT_ROOT),
+                start_new_session=True,
+            )
+
+        return (
+            f"Training loop started for run {run_id} (PID {proc.pid}).\n"
+            f"  Training examples : {n_train}\n"
+            f"  Log               : collector_training/logs/run_{run_id}.log\n"
+            f"  Monitor           : get_training_status(run_id={run_id})\n"
+            f"  Stop              : stop_training_run(run_id={run_id})"
+        )
+    except Exception as e:
+        return f"Error starting training loop: {e}"
+
+
+@mcp.tool()
 def stop_training_run(run_id: int) -> str:
     """
     Mark a training run as stopped. In-flight iterations will complete, then stop.

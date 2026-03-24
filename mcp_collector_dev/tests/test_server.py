@@ -1,7 +1,7 @@
 """
 Unit tests for mcp_collector_dev/server.py
 
-Tests cover all 7 tools:
+Tests cover all 8 tools:
   - fetch_url_content
   - analyze_page_structure
   - get_collector_interface
@@ -9,6 +9,7 @@ Tests cover all 7 tools:
   - scaffold_collector
   - register_collector
   - test_collector_on_project
+  - run_training_loop
 """
 
 import shutil
@@ -448,6 +449,108 @@ class TestTestCollectorOnProject(unittest.TestCase):
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="python", timeout=300)
         result = server.test_collector_on_project("test_col", 42)
         self.assertIn("timed out", result)
+
+
+class TestRunTrainingLoop(unittest.TestCase):
+    """Tests for the run_training_loop MCP tool."""
+
+    def _make_db(self, status: str = "running", n_train: int = 5) -> Path:
+        """Create a minimal in-memory-backed temp DB with one training run."""
+        tmp = tempfile.mkdtemp()
+        db_path = Path(tmp) / "training.db"
+        con = sqlite3.connect(str(db_path))
+        con.execute("""
+            CREATE TABLE training_runs (
+                run_id INTEGER PRIMARY KEY,
+                collector_name TEXT,
+                source_site TEXT,
+                status TEXT,
+                config_json TEXT,
+                started_at TEXT,
+                notes TEXT
+            )
+        """)
+        con.execute("""
+            CREATE TABLE training_examples (
+                example_id INTEGER PRIMARY KEY,
+                run_id INTEGER,
+                is_validation INTEGER DEFAULT 0
+            )
+        """)
+        con.execute(
+            "INSERT INTO training_runs VALUES (1,'CmsGovCollector','data.cms.gov',?,?,datetime('now'),'')",
+            (status, '{"collector_name":"CmsGovCollector","collector_module_name":"cms_collector","source_site":"data.cms.gov"}'),
+        )
+        for i in range(n_train):
+            con.execute(
+                "INSERT INTO training_examples (run_id, is_validation) VALUES (1, 0)"
+            )
+        con.commit()
+        con.close()
+        return db_path
+
+    @patch("mcp_collector_dev.server._get_training_db")
+    def test_run_not_found_returns_error(self, mock_db: MagicMock) -> None:
+        db_path = self._make_db()
+        mock_db.return_value = db_path
+        result = server.run_training_loop(999)
+        self.assertIn("not found", result)
+
+    @patch("mcp_collector_dev.server._get_training_db")
+    def test_stopped_run_returns_error(self, mock_db: MagicMock) -> None:
+        db_path = self._make_db(status="stopped")
+        mock_db.return_value = db_path
+        result = server.run_training_loop(1)
+        self.assertIn("stopped", result)
+
+    @patch("mcp_collector_dev.server._get_training_db")
+    def test_completed_run_returns_error(self, mock_db: MagicMock) -> None:
+        db_path = self._make_db(status="completed")
+        mock_db.return_value = db_path
+        result = server.run_training_loop(1)
+        self.assertIn("completed", result)
+
+    @patch("mcp_collector_dev.server._get_training_db")
+    def test_no_training_examples_returns_error(self, mock_db: MagicMock) -> None:
+        db_path = self._make_db(n_train=0)
+        mock_db.return_value = db_path
+        result = server.run_training_loop(1)
+        self.assertIn("no training examples", result)
+
+    @patch("mcp_collector_dev.server.subprocess.Popen")
+    @patch("mcp_collector_dev.server._get_training_db")
+    def test_valid_run_spawns_subprocess_with_execute_flag(
+        self, mock_db: MagicMock, mock_popen: MagicMock
+    ) -> None:
+        db_path = self._make_db(n_train=10)
+        mock_db.return_value = db_path
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_popen.return_value = mock_proc
+
+        result = server.run_training_loop(1)
+
+        mock_popen.assert_called_once()
+        cmd = mock_popen.call_args[0][0]
+        self.assertIn("--execute", cmd)
+        self.assertIn("1", cmd)
+        self.assertIn("12345", result)
+        self.assertIn("run_1.log", result)
+        self.assertIn("get_training_status", result)
+
+    @patch("mcp_collector_dev.server.subprocess.Popen")
+    @patch("mcp_collector_dev.server._get_training_db")
+    def test_subprocess_uses_start_new_session(
+        self, mock_db: MagicMock, mock_popen: MagicMock
+    ) -> None:
+        db_path = self._make_db(n_train=5)
+        mock_db.return_value = db_path
+        mock_popen.return_value = MagicMock(pid=99)
+
+        server.run_training_loop(1)
+
+        kwargs = mock_popen.call_args[1]
+        self.assertTrue(kwargs.get("start_new_session"))
 
 
 if __name__ == "__main__":
