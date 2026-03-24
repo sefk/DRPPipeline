@@ -185,15 +185,15 @@ class CmsGovCollector:
             if not all_files:
                 record_warning(drpid, "No files found to download")
             elif training_mode:
-                planned = []
-                for r in all_files:
-                    raw_name = r.get("file_name") or r.get("file_url", "").split("/")[-1].split("?")[0]
-                    name = sanitize_filename(raw_name) if raw_name else "dataset"
-                    planned.append({"name": name, "type": r.get("type", "")})
+                planned = self._build_file_list(all_files)
                 with open(folder_path / "planned_files.json", "w", encoding="utf-8") as fh:
                     json.dump(planned, fh, indent=2)
+                result["files"] = planned
             else:
                 self._download_files(drpid, all_files, folder_path)
+                downloaded_files = self._build_file_list_from_folder(folder_path)
+                if downloaded_files:
+                    result["files"] = downloaded_files
 
             if not training_mode:
                 self._download_dataset_metadata(drpid, current_uuid, folder_path)
@@ -225,6 +225,46 @@ class CmsGovCollector:
             return result
 
         return result
+
+    def _build_file_list(self, all_files: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        """Build file list from API resources."""
+        planned = []
+        for r in all_files:
+            raw_name = r.get("file_name") or r.get("file_url", "").split("/")[-1].split("?")[0]
+            name = sanitize_filename(raw_name) if raw_name else "dataset"
+            file_type = r.get("type", "")
+            planned.append({"name": name, "type": file_type})
+        return planned
+
+    def _build_file_list_from_folder(self, folder_path: Path) -> List[Dict[str, str]]:
+        """Build file list from downloaded files in folder."""
+        files = []
+        if not folder_path.exists():
+            return files
+        
+        for item in sorted(folder_path.iterdir()):
+            if item.is_file() and item.name != "dataset_metadata.json" and item.name != "planned_files.json":
+                # Infer file type from name or extension
+                file_type = self._infer_file_type_from_name(item.name)
+                files.append({"name": item.name, "type": file_type})
+        
+        return files
+
+    def _infer_file_type_from_name(self, filename: str) -> str:
+        """Infer file type from filename."""
+        lower = filename.lower()
+        if "data_dictionary" in lower or "dictionary" in lower:
+            return "Data Dictionary"
+        if "methodology" in lower or "method" in lower or "technical" in lower:
+            return "Methodology"
+        if "readme" in lower or "documentation" in lower:
+            return "Documentation"
+        if "codebook" in lower:
+            return "Codebook"
+        if "fact_sheet" in lower or "factsheet" in lower or "fact sheet" in lower:
+            return "Methodology"
+        # Default to Primary for data files
+        return "Primary"
 
     def _innovation_page_has_data(self, url: str, drpid: int) -> bool:
         """

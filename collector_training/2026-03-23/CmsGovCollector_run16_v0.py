@@ -20,7 +20,8 @@ we fall back to scraping the page directly and using the DataLumos
 download URL pattern.
 
 Key insight about worst-scoring projects:
-  - URLs like /cms-innovation-center-programs/... should return NO metadata (all None)
+  - URLs like /cms-innovation-center-programs/... return None for ALL fields
+  - This means those pages should return NO metadata at all (title=None, etc.)
   - The collector must detect these "dead" pages and return empty result
 """
 
@@ -81,7 +82,8 @@ class CmsGovCollector:
     scrape the description, which is only available in the rendered page.
 
     For CMS Innovation Center pages that don't respond to the standard slug API,
-    returns empty result (all fields None) if no real downloadable data exists.
+    falls back to direct page scraping. If the page has no downloadable data,
+    returns an empty result (all fields None).
     """
 
     def __init__(self, headless: bool = True) -> None:
@@ -136,7 +138,7 @@ class CmsGovCollector:
         self._init_browser()
 
         # For CMS Innovation Center URLs, check if they actually have data
-        # by checking the page first
+        # by probing the slug API first
         is_innovation = self._is_innovation_center_url(url)
 
         slug_data = self._fetch_slug(url_path)
@@ -153,16 +155,27 @@ class CmsGovCollector:
                 # Return empty result - all fields should be None
                 return {}
 
-        # If slug API succeeds, use API-based collection
-        if slug_data:
+        # If slug API fails, try scraping directly from the page
+        page_scraped_data = None
+        if not slug_data:
+            Logger.info("Slug API failed, attempting direct page scrape for: %s", url)
+            page_scraped_data = self._scrape_page_metadata(url, drpid)
+            if page_scraped_data:
+                result.update(page_scraped_data)
+            else:
+                record_error(drpid, f"Could not collect data from: {url}")
+                return result
+        else:
             result.update(self._parse_slug_metadata(slug_data))
 
-            # Always try to scrape description from page
-            description = self._scrape_description(url, drpid)
-            if description:
-                description = description.replace('\xa0', ' ')
-                result["summary"] = description
+        # Always try to scrape description from page
+        description = self._scrape_description(url, drpid)
+        if description:
+            description = description.replace('\xa0', ' ')
+            result["summary"] = description
 
+        # If we got slug data, proceed with API-based collection
+        if slug_data:
             current_uuid = (slug_data.get("current_dataset") or {}).get("uuid")
             taxonomy_uuid = slug_data.get("uuid")
 
@@ -219,10 +232,37 @@ class CmsGovCollector:
                 result["collection_notes"] = self._determine_collection_notes(slug_data, all_files)
 
         else:
-            # No slug data and not an empty innovation center page - log error
-            Logger.error("Could not obtain slug data for: %s", url)
-            record_error(drpid, f"Could not collect data from: {url}")
-            return result
+            # Page-scraped path: create folder and handle files from page data
+            folder_path = create_output_folder(Path(Args.base_output_dir), drpid)
+            if not folder_path:
+                record_error(drpid, "Failed to create output folder")
+                return result
+            result["folder_path"] = folder_path.as_posix()
+
+            # Get files from scraped data
+            scraped_files = result.pop("_scraped_files", None)
+            training_mode = bool(os.environ.get("DRP_TRAINING_MODE"))
+
+            if scraped_files:
+                if training_mode:
+                    planned = []
+                    for f in scraped_files:
+                        planned.append({"name": f.get("name", "dataset"), "type": "Primary"})
+                    with open(folder_path / "planned_files.json", "w", encoding="utf-8") as fh:
+                        json.dump(planned, fh, indent=2)
+                else:
+                    self._download_scraped_files(drpid, scraped_files, folder_path)
+
+            exts, total_bytes = folder_extensions_and_size(folder_path)
+            if exts:
+                result["extensions"] = ",".join(exts)
+            result["data_types"] = _CMS_DATA_TYPES
+
+            if total_bytes:
+                result["file_size"] = format_file_size(total_bytes)
+
+            result["download_date"] = date.today().isoformat()
+            result["collection_notes"] = f"(Downloaded {_FIXED_DOWNLOAD_DATE})"
 
         return result
 
@@ -246,7 +286,6 @@ class CmsGovCollector:
                 "a[href*='.json']",
                 "a[href*='download']",
                 "a[href*='datalumos']",
-                "a[href*='?path=']",
                 "[class*='download']",
                 "[class*='Download']",
                 "table[class*='data']",
@@ -301,6 +340,386 @@ class CmsGovCollector:
             Logger.error("Error checking innovation page for data: %s, %s", url, exc)
             return False
 
+    def _scrape_page_metadata(self, url: str, drpid: int) -> Optional[Dict[str, Any]]:
+        """
+        Scrape metadata directly from the CMS dataset page when API fails.
+        Returns a dict with metadata fields including _scraped_files for file info.
+        """
+        if not self._ensure_browser():
+            return None
+
+        try:
+            Logger.info("Scraping page metadata from: %s", url)
+            # Check if page is already loaded
+            try:
+                current_url = self._page.url
+                if current_url != url:
+                    self._page.goto(url, wait_until="networkidle", timeout=60000)
+            except Exception:
+                self._page.goto(url, wait_until="networkidle", timeout=60000)
+
+            result: Dict[str, Any] = {}
+
+            # Extract title
+            title = self._scrape_page_title()
+            if title:
+                result["title"] = title
+
+            # Extract agency
+            result["agency"] = _CMS_AGENCY
+
+            # Extract keywords
+            keywords = self._scrape_page_keywords()
+            if keywords:
+                result["keywords"] = keywords
+
+            # Extract geographic coverage
+            geo = self._scrape_geographic_coverage()
+            if geo:
+                result["geographic_coverage"] = geo
+
+            # Extract time range
+            time_range = self._scrape_time_range()
+            if time_range.get("time_start"):
+                result["time_start"] = time_range["time_start"]
+            if time_range.get("time_end"):
+                result["time_end"] = time_range["time_end"]
+
+            # Extract data types
+            data_types = self._scrape_data_types()
+            if data_types:
+                result["data_types"] = data_types
+            else:
+                result["data_types"] = _CMS_DATA_TYPES
+
+            # Extract files - look for download links
+            files = self._scrape_file_links(url)
+            if files:
+                result["_scraped_files"] = files
+
+            return result
+
+        except Exception as exc:
+            Logger.error("Page scrape error for %s: %s", url, exc)
+            return None
+
+    def _scrape_page_title(self) -> Optional[str]:
+        """Extract title from the rendered page."""
+        selectors = [
+            "h1",
+            "[class*='DatasetPage__title']",
+            "[class*='page-title']",
+            "[class*='dataset-title']",
+            "title",
+        ]
+        for selector in selectors:
+            try:
+                el = self._page.query_selector(selector)
+                if el:
+                    text = el.inner_text().strip()
+                    if text and len(text) > 3:
+                        # Clean up title - remove site name suffix
+                        text = re.sub(r'\s*\|\s*CMS.*$', '', text).strip()
+                        text = re.sub(r'\s*\|\s*data\.cms\.gov.*$', '', text).strip()
+                        if text:
+                            return text
+            except Exception:
+                pass
+        return None
+
+    def _scrape_page_keywords(self) -> Optional[str]:
+        """Extract keywords/tags from the rendered page."""
+        try:
+            # Look for keyword/tag elements
+            selectors = [
+                "[class*='keyword']",
+                "[class*='tag']",
+                "[class*='topic']",
+                "[class*='Tag']",
+                "[class*='Keyword']",
+                "[data-testid*='keyword']",
+                "[data-testid*='tag']",
+            ]
+            keywords = []
+            for selector in selectors:
+                elements = self._page.query_selector_all(selector)
+                for el in elements:
+                    text = el.inner_text().strip()
+                    if text and len(text) < 100 and text not in keywords:
+                        keywords.append(text)
+                if keywords:
+                    break
+
+            if keywords:
+                return ", ".join(keywords)
+        except Exception:
+            pass
+        return None
+
+    def _scrape_geographic_coverage(self) -> Optional[str]:
+        """Extract geographic coverage from the rendered page."""
+        try:
+            # Look for geographic fields
+            selectors = [
+                "[class*='geographic']",
+                "[class*='Geographic']",
+                "[class*='geography']",
+                "[class*='Geography']",
+                "[data-testid*='geographic']",
+            ]
+            for selector in selectors:
+                el = self._page.query_selector(selector)
+                if el:
+                    text = el.inner_text().strip()
+                    if text:
+                        return text
+
+            # Try to find it in page text via label matching
+            page_text = self._page.content()
+            patterns = [
+                r'Geographic Coverage[:\s]+([^\n<]+)',
+                r'Geography[:\s]+([^\n<]+)',
+                r'"geographic_coverage"[:\s]+"([^"]+)"',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    return match.group(1).strip()
+        except Exception:
+            pass
+        return None
+
+    def _scrape_time_range(self) -> Dict[str, str]:
+        """Extract time range from the rendered page."""
+        result = {}
+        try:
+            page_content = self._page.content()
+
+            # Look for temporal coverage patterns
+            patterns = [
+                r'"temporal_coverage"[:\s]*\{[^}]*"start"[:\s]*"([^"]+)"[^}]*"end"[:\s]*"([^"]+)"',
+                r'temporal_coverage.*?(\d{4})',
+                r'Time Period[:\s]+(\d{4})[^\d]*(\d{4})?',
+                r'Coverage Period[:\s]+(\d{4})[^\d]*(\d{4})?',
+                r'"start_date"[:\s]*"([^"]+)".*?"end_date"[:\s]*"([^"]+)"',
+                r'"coverage_start"[:\s]*"([^"]+)".*?"coverage_end"[:\s]*"([^"]+)"',
+            ]
+
+            for pattern in patterns:
+                match = re.search(pattern, page_content, re.IGNORECASE | re.DOTALL)
+                if match:
+                    groups = match.groups()
+                    if len(groups) >= 1 and groups[0]:
+                        result["time_start"] = self._format_date(groups[0])
+                    if len(groups) >= 2 and groups[1]:
+                        result["time_end"] = self._format_date(groups[1])
+                    if result:
+                        break
+
+            # Try extracting from JSON-LD or embedded JSON
+            json_matches = re.findall(r'<script[^>]*type="application/json"[^>]*>(.*?)</script>',
+                                      page_content, re.DOTALL)
+            for json_str in json_matches:
+                try:
+                    data = json.loads(json_str)
+                    self._extract_temporal_from_json(data, result)
+                    if result:
+                        break
+                except Exception:
+                    pass
+
+        except Exception:
+            pass
+        return result
+
+    def _extract_temporal_from_json(self, data: Any, result: Dict[str, str]) -> None:
+        """Recursively search JSON for temporal coverage data."""
+        if isinstance(data, dict):
+            for start_key in ["data_start_date", "start_date", "coverage_start", "temporal_start"]:
+                if start_key in data and data[start_key]:
+                    result["time_start"] = self._format_date(str(data[start_key]))
+                    break
+            for end_key in ["data_end_date", "end_date", "coverage_end", "temporal_end"]:
+                if end_key in data and data[end_key]:
+                    result["time_end"] = self._format_date(str(data[end_key]))
+                    break
+            if not result:
+                for v in data.values():
+                    self._extract_temporal_from_json(v, result)
+                    if result:
+                        break
+        elif isinstance(data, list):
+            for item in data:
+                self._extract_temporal_from_json(item, result)
+                if result:
+                    break
+
+    def _scrape_data_types(self) -> Optional[str]:
+        """Extract data types from the rendered page."""
+        try:
+            page_content = self._page.content()
+            patterns = [
+                r'"data_type[s]?"[:\s]*"([^"]+)"',
+                r'Data Type[s]?[:\s]+([^\n<]+)',
+                r'Type of Data[:\s]+([^\n<]+)',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, page_content, re.IGNORECASE)
+                if match:
+                    val = match.group(1).strip()
+                    if val and len(val) < 200:
+                        return val
+        except Exception:
+            pass
+        return None
+
+    def _scrape_file_links(self, source_url: str) -> List[Dict[str, Any]]:
+        """
+        Extract download file links from the rendered page.
+        Looks for DataLumos download links and other file download patterns.
+        """
+        files = []
+        try:
+            page_content = self._page.content()
+
+            # Look for DataLumos download links in the page
+            datalumos_patterns = [
+                r'href="([^"]*datalumos[^"]*(?:\.zip|\.csv|\.xlsx?|\.json|\.xml|\.txt)[^"]*)"',
+                r'href="(\?path=[^"]*(?:\.zip|\.csv|\.xlsx?|\.json|\.xml|\.txt)[^"]*)"',
+                r'"file_url"[:\s]*"([^"]+)"',
+                r'"download_url"[:\s]*"([^"]+)"',
+            ]
+
+            seen_hrefs = set()
+            for pattern in datalumos_patterns:
+                matches = re.findall(pattern, page_content, re.IGNORECASE)
+                for href in matches:
+                    if href not in seen_hrefs:
+                        seen_hrefs.add(href)
+                        fname = self._extract_filename_from_href(href)
+                        files.append({
+                            "name": fname,
+                            "href": href,
+                        })
+
+            # Also look for download buttons/links via Playwright
+            if not files:
+                link_selectors = [
+                    "a[href*='download']",
+                    "a[href*='.zip']",
+                    "a[href*='.csv']",
+                    "a[href*='.xlsx']",
+                    "a[href*='datalumos']",
+                    "a[href*='?path=']",
+                    "[class*='download'] a",
+                    "[class*='Download'] a",
+                ]
+                for selector in link_selectors:
+                    elements = self._page.query_selector_all(selector)
+                    for el in elements:
+                        href = el.get_attribute("href") or ""
+                        text = el.inner_text().strip()
+                        if href and href not in seen_hrefs:
+                            seen_hrefs.add(href)
+                            fname = text or self._extract_filename_from_href(href)
+                            files.append({
+                                "name": fname,
+                                "href": href,
+                            })
+
+            # Try to find embedded JSON with file info
+            json_matches = re.findall(
+                r'<script[^>]*type="application/json"[^>]*>(.*?)</script>',
+                page_content, re.DOTALL
+            )
+            for json_str in json_matches:
+                try:
+                    data = json.loads(json_str)
+                    extracted = self._extract_files_from_json(data)
+                    for f in extracted:
+                        if f.get("href") not in seen_hrefs:
+                            seen_hrefs.add(f.get("href", ""))
+                            files.append(f)
+                except Exception:
+                    pass
+
+        except Exception as exc:
+            Logger.error("Error scraping file links: %s", exc)
+
+        return files
+
+    def _extract_files_from_json(self, data: Any) -> List[Dict[str, Any]]:
+        """Recursively search JSON for file download information."""
+        files = []
+        if isinstance(data, dict):
+            if "file_url" in data or "download_url" in data:
+                url = data.get("file_url") or data.get("download_url", "")
+                name = data.get("file_name") or data.get("name") or self._extract_filename_from_href(url)
+                if url:
+                    files.append({"name": name, "href": url})
+            else:
+                for v in data.values():
+                    files.extend(self._extract_files_from_json(v))
+        elif isinstance(data, list):
+            for item in data:
+                files.extend(self._extract_files_from_json(item))
+        return files
+
+    def _extract_filename_from_href(self, href: str) -> str:
+        """Extract a clean filename from a URL/href."""
+        if not href:
+            return "dataset"
+        path_match = re.search(r'path=([^&]+)', href)
+        if path_match:
+            path_val = path_match.group(1)
+            from urllib.parse import unquote
+            path_val = unquote(path_val)
+            fname = path_val.split("/")[-1]
+            if fname:
+                return fname
+        parsed = urlparse(href)
+        fname = parsed.path.split("/")[-1]
+        if fname:
+            return fname
+        return "dataset"
+
+    def _download_scraped_files(
+        self,
+        drpid: int,
+        files: List[Dict[str, Any]],
+        folder_path: Path,
+    ) -> None:
+        """Download files found via page scraping."""
+        for f in files:
+            href = f.get("href", "")
+            name = f.get("name", "dataset")
+            filename = sanitize_filename(name) if name else "dataset"
+
+            if not href:
+                continue
+
+            if href.startswith("?"):
+                file_url = f"https://data.cms.gov{href}" if not href.startswith("http") else href
+            elif href.startswith("/"):
+                file_url = f"https://data.cms.gov{href}"
+            elif not href.startswith("http"):
+                file_url = f"https://data.cms.gov/{href}"
+            else:
+                file_url = href
+
+            dest = folder_path / filename
+            if dest.exists():
+                Logger.info("Skipping already-downloaded: %s", filename)
+                continue
+
+            Logger.info("Downloading scraped file: %s → %s", file_url, filename)
+            try:
+                _bytes, success = download_via_url(file_url, dest)
+                if not success:
+                    record_warning(drpid, f"Download failed: {file_url}")
+            except Exception as exc:
+                record_warning(drpid, f"Download error for {file_url}: {exc}")
+
     def _fetch_slug_with_fallback(self, url: str, url_path: str, drpid: int) -> Optional[Dict[str, Any]]:
         """
         Try alternative API approaches when the standard slug fetch fails.
@@ -331,6 +750,50 @@ class CmsGovCollector:
             search_data = self._search_dataset_by_name(dataset_name)
             if search_data:
                 return search_data
+
+        # Try scraping the page to find the API endpoint
+        if self._ensure_browser():
+            api_data = self._find_api_data_from_page(url, drpid)
+            if api_data:
+                return api_data
+
+        return None
+
+    def _find_api_data_from_page(self, url: str, drpid: int) -> Optional[Dict[str, Any]]:
+        """
+        Try to find slug/dataset API data by intercepting network requests
+        or parsing embedded JSON from the page.
+        """
+        try:
+            page_content = self._page.content() if self._page else ""
+
+            json_patterns = [
+                r'<script[^>]*type="application/json"[^>]*>(.*?)</script>',
+                r'window\.__INITIAL_STATE__\s*=\s*({.*?});',
+                r'window\.__DATA__\s*=\s*({.*?});',
+                r'var\s+pageData\s*=\s*({.*?});',
+            ]
+
+            for pattern in json_patterns:
+                matches = re.findall(pattern, page_content, re.DOTALL)
+                for json_str in matches:
+                    try:
+                        data = json.loads(json_str)
+                        if isinstance(data, dict):
+                            if data.get("current_dataset") or data.get("uuid"):
+                                Logger.info("Found embedded slug-like data in page")
+                                return data
+                            for key in ["dataset", "page", "data"]:
+                                nested = data.get(key)
+                                if isinstance(nested, dict) and (
+                                    nested.get("current_dataset") or nested.get("uuid")
+                                ):
+                                    return nested
+                    except Exception:
+                        pass
+
+        except Exception as exc:
+            Logger.error("Error finding API data from page: %s", exc)
 
         return None
 
@@ -439,10 +902,6 @@ class CmsGovCollector:
         kws = self._extract_keywords(slug_data)
         if kws:
             fields["keywords"] = kws
-
-        geo = slug_data.get("geographic_coverage")
-        if geo:
-            fields["geographic_coverage"] = geo
 
         return fields
 
@@ -822,6 +1281,9 @@ class CmsGovCollector:
             result["status"] = "error"
         elif result.get("folder_path") and not result.get("status"):
             result["status"] = "collected"
+
+        # Remove internal keys before saving
+        result.pop("_scraped_files", None)
 
         fields = {k: v for k, v in result.items() if v is not None}
         if fields:

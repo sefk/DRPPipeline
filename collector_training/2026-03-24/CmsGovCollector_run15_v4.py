@@ -184,16 +184,19 @@ class CmsGovCollector:
 
             if not all_files:
                 record_warning(drpid, "No files found to download")
+                result["files"] = []
             elif training_mode:
                 planned = []
                 for r in all_files:
                     raw_name = r.get("file_name") or r.get("file_url", "").split("/")[-1].split("?")[0]
                     name = sanitize_filename(raw_name) if raw_name else "dataset"
                     planned.append({"name": name, "type": r.get("type", "")})
+                result["files"] = planned
                 with open(folder_path / "planned_files.json", "w", encoding="utf-8") as fh:
                     json.dump(planned, fh, indent=2)
             else:
-                self._download_files(drpid, all_files, folder_path)
+                downloaded_files = self._download_files(drpid, all_files, folder_path)
+                result["files"] = downloaded_files
 
             if not training_mode:
                 self._download_dataset_metadata(drpid, current_uuid, folder_path)
@@ -214,8 +217,8 @@ class CmsGovCollector:
 
             result["download_date"] = date.today().isoformat()
 
-            downloaded_files = list(folder_path.iterdir()) if folder_path.exists() else []
-            if downloaded_files:
+            downloaded_items = list(folder_path.iterdir()) if folder_path.exists() else []
+            if downloaded_items:
                 result["collection_notes"] = self._determine_collection_notes(slug_data, all_files)
 
         else:
@@ -577,7 +580,10 @@ class CmsGovCollector:
         drpid: int,
         files: List[Dict[str, Any]],
         folder_path: Path,
-    ) -> None:
+    ) -> List[Dict[str, str]]:
+        """Download files and return list of dicts with 'name' and 'type' keys."""
+        downloaded_files = []
+
         for resource in files:
             file_url = resource.get("file_url", "")
             raw_name = resource.get("file_name") or file_url.split("/")[-1].split("?")[0]
@@ -586,6 +592,7 @@ class CmsGovCollector:
 
             if dest.exists():
                 Logger.info("Skipping already-downloaded: %s", filename)
+                downloaded_files.append({"name": filename, "type": resource.get("type", "")})
                 continue
 
             Logger.info(
@@ -596,10 +603,14 @@ class CmsGovCollector:
             )
             try:
                 _bytes, success = download_via_url(file_url, dest)
-                if not success:
+                if success:
+                    downloaded_files.append({"name": filename, "type": resource.get("type", "")})
+                else:
                     record_warning(drpid, f"Download failed: {file_url}")
             except Exception as exc:
                 record_warning(drpid, f"Download error for {file_url}: {exc}")
+
+        return downloaded_files
 
     def _extract_date_range_from_metadata(
         self,
