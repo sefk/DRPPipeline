@@ -98,8 +98,8 @@ class CollectorTrainer:
 
         AnalyzeCollectorGaps, RefineCollector = _make_signatures(dspy)
 
-        analyze_model = model_config.get("analyze", "claude-sonnet-4-6")
-        refine_model  = model_config.get("refine",  "claude-sonnet-4-6")
+        analyze_model = model_config.get("analyze", "claude-haiku-4-5-20251001")
+        refine_model  = model_config.get("refine",  "claude-haiku-4-5-20251001")
 
         self._analyze_lm = dspy.LM(f"anthropic/{analyze_model}")
         self._refine_lm  = dspy.LM(f"anthropic/{refine_model}")
@@ -160,7 +160,7 @@ class DSPyRefiner:
         compiled_path: Optional[Path] = None,
     ) -> None:
         self.model_config = model_config or {}
-        self.model = model_config.get("refine", "claude-sonnet-4-6") if model_config else "claude-sonnet-4-6"
+        self.model = model_config.get("refine", "claude-haiku-4-5-20251001") if model_config else "claude-haiku-4-5-20251001"
         self._trainer: Optional[CollectorTrainer] = None
         self._compiled_path = compiled_path
 

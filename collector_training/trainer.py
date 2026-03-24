@@ -349,7 +349,7 @@ class SimpleRefiner:
     Replaced by DSPy optimizer in Phase 3 (see dspy_modules.py).
     """
 
-    def __init__(self, model: str = "claude-sonnet-4-6") -> None:
+    def __init__(self, model: str = "claude-haiku-4-5-20251001") -> None:
         self.model = model
 
     def refine(

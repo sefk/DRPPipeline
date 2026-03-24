@@ -97,7 +97,7 @@ class TrainingConfig:
     perfect_score_threshold: float = 0.95
 
     # Model configuration
-    model_refine: str = "claude-sonnet-4-6"
+    model_refine: str = "claude-haiku-4-5-20251001"
 
     # Cost-aware model switching
     cheap_model: str = "claude-haiku-4-5-20251001"

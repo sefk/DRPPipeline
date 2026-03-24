@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS projects (
     download_date TEXT,
     collection_notes TEXT,
     file_size TEXT,
+    geographic_coverage TEXT,
     published_url TEXT
 );
 
