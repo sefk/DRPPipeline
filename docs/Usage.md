@@ -315,6 +315,70 @@ These projects are now ready to be processed by a collector (`cms_collector`, et
 
 ---
 
+### Worked example: evaluating collection quality
+
+After a dataset has been uploaded to DataLumos, you can ask how well the
+collection compares to others in the inventory:
+
+> **"How well did we do collecting and uploading the 'Federally Qualified Health Center All Owners' dataset?"**
+
+Claude calls `compare_collection_quality` (from the `drp-collector-dev` MCP server), which:
+
+1. Scrapes the target project's public DataLumos page (no authentication needed).
+2. Looks up the project's source URL in the local pipeline DB to identify its data source (e.g. `data.cms.gov`).
+3. Auto-detects the matching spreadsheet tab (e.g. "CMS") by fetching the XLSX tab list and resolving the name to a GID via the Sheets API.
+4. Finds 3 completed projects in that tab claimed by **different people** to use as controls, and scrapes each one.
+5. Compares metadata completeness and file types, then returns a report.
+
+Example output:
+
+```
+=== Collection Quality Report ===
+  Treatment : DataLumos #247122  "Federally Qualified Health Center All Owners"  (claimed by: sefk)
+  (tab auto-detected: "CMS" gid=864890349)
+  Controls  : #238570 (Jennifer @WashU), #238228 (mkraley), #238565 (??)
+
+── Metadata Completeness ──
+  ✓  Title                            set
+  -  Agency                           empty everywhere (skip)
+  ✗  Summary                          very short: 268 chars vs controls avg 931
+  ✓  Keywords / Subject Terms         set
+  ✗  Geographic Coverage              MISSING  (1/3 controls have it)
+  ✗  Time Period                      MISSING  (2/3 controls have it)
+  ✓  Data Types                       set  (controls all empty)
+  ✓  Collection Notes                 set  (controls all empty)
+
+── Files ──
+  ✓  Data files (10): FQHC_All_Owners_2023.11.01.csv, ...  (+6 more)
+  ~  No documentation files (data dictionaries, guides, READMEs)
+  ✓  File count: 10  (controls avg 0.7)
+
+── Summary ──
+  Overall: RED  (6 OK, 1 warnings, 3 failures, 1 skipped)
+
+  To improve:
+    • Summary  very short: 268 chars vs controls avg 931
+    • Geographic Coverage  MISSING  (1/3 controls have it)
+    • Time Period  MISSING  (2/3 controls have it)
+```
+
+You can also call the tool directly with a DataLumos URL or bare project ID:
+
+```python
+compare_collection_quality(
+    datalumos_url="247122",
+    sheet_id="1fpNctIesSYc2giu0aHduYLBxVYqlsMMMVhKIPVtY7P0",
+    # sheet_gid auto-detected from source URL domain; or pass explicitly to override
+    num_controls=3,
+)
+```
+
+The tool is implemented in `mcp_collector_dev/server.py`. For details on how
+it works and how to extend the domain-to-tab mapping, see
+[collector-training.md](collector-training.md).
+
+---
+
 ## 2. Parameters
 
 Configuration is resolved from (in order of priority, highest first):
