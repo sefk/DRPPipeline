@@ -1062,5 +1062,563 @@ def stop_training_run(run_id: int) -> str:
         return f"Error stopping training run: {e}"
 
 
+# ── collection quality comparison ─────────────────────────────────────────────
+
+def _extract_project_id(url_or_id: str) -> "str | None":
+    """Extract DataLumos project/workspace numeric ID from a URL or bare number."""
+    if not url_or_id:
+        return None
+    m = re.search(r"/project/(\d+)", url_or_id)
+    if m:
+        return m.group(1)
+    m = re.search(r"/datalumos/(\d+)", url_or_id)
+    if m:
+        return m.group(1)
+    if re.match(r"^\d+$", str(url_or_id).strip()):
+        return str(url_or_id).strip()
+    return None
+
+
+def _fetch_controls_from_sheet(
+    sheet_id: str,
+    sheet_gid: str,
+    treatment_project_id: str,
+    num_controls: int,
+) -> "tuple[str | None, list[dict]]":
+    """
+    Search one inventory spreadsheet tab for completed projects to use as controls.
+
+    Returns (treatment_claimant, controls) where each control dict has keys:
+    'project_id', 'claimant', 'source_url'.
+
+    Prefers controls from different claimants; excludes the treatment project itself.
+    """
+    import csv
+    import io as _io
+
+    csv_url = (
+        f"https://docs.google.com/spreadsheets/d/{sheet_id}/export"
+        f"?format=csv&gid={sheet_gid}"
+    )
+    resp = requests.get(csv_url, headers=BROWSER_HEADERS, timeout=30)
+    resp.raise_for_status()
+    rows = list(csv.DictReader(_io.StringIO(resp.text)))
+
+    # Locate the treatment row to find its claimant
+    treatment_claimant: "str | None" = None
+    for row in rows:
+        dl = (row.get("Download Location") or "").strip()
+        pid = _extract_project_id(dl)
+        if pid == treatment_project_id:
+            raw = (row.get("Claimed (add your name)") or "").strip()
+            treatment_claimant = raw if raw else None
+            break
+
+    # Gather controls: rows with a Download Location, preferring different claimants
+    controls: "list[dict]" = []
+    seen_pids: "set[str]" = {treatment_project_id}
+    seen_claimants: "set[str]" = set()
+
+    for row in rows:
+        if len(controls) >= num_controls:
+            break
+        dl = (row.get("Download Location") or "").strip()
+        if not dl:
+            continue
+        pid = _extract_project_id(dl)
+        if not pid or pid in seen_pids:
+            continue
+        claimant = (row.get("Claimed (add your name)") or "").strip() or "unknown"
+        # Skip same claimant (when we know who claimed the treatment)
+        if treatment_claimant and claimant == treatment_claimant:
+            continue
+        # Skip if we already have someone from this claimant (for diversity)
+        if claimant in seen_claimants:
+            continue
+        seen_pids.add(pid)
+        seen_claimants.add(claimant)
+        controls.append({
+            "project_id": pid,
+            "claimant": claimant,
+            "source_url": (row.get("URL") or "").strip(),
+        })
+
+    # If we still need more controls and diversity requirement prevented it, relax it
+    if len(controls) < num_controls:
+        for row in rows:
+            if len(controls) >= num_controls:
+                break
+            dl = (row.get("Download Location") or "").strip()
+            if not dl:
+                continue
+            pid = _extract_project_id(dl)
+            if not pid or pid in seen_pids:
+                continue
+            claimant = (row.get("Claimed (add your name)") or "").strip() or "unknown"
+            if treatment_claimant and claimant == treatment_claimant:
+                continue
+            seen_pids.add(pid)
+            controls.append({
+                "project_id": pid,
+                "claimant": claimant,
+                "source_url": (row.get("URL") or "").strip(),
+            })
+
+    return treatment_claimant, controls
+
+
+def _categorize_files(files: list) -> dict:
+    """Categorize file dicts (with 'name' key) into data, documentation, and other."""
+    _DATA_EXTS = {
+        ".csv", ".xlsx", ".xls", ".json", ".xml", ".tsv", ".zip",
+        ".gz", ".shp", ".geojson", ".parquet", ".dta", ".sas7bdat",
+    }
+    _DOC_KEYWORDS = {
+        "readme", "guide", "user", "usage", "documentation", "manual",
+        "codebook", "dictionary", "methodology", "technical", "notes",
+        "about", "description", "faq", "help",
+    }
+    _DOC_EXTS = {".pdf", ".docx", ".doc", ".md", ".html", ".htm"}
+
+    result: dict = {"data": [], "documentation": [], "other": []}
+    for f in files or []:
+        name = (f.get("name") or "").strip()
+        if not name:
+            continue
+        name_lower = name.lower()
+        p = Path(name_lower)
+        stem = p.stem
+        ext = p.suffix.lower()
+
+        is_doc = (ext in _DOC_EXTS) or any(kw in stem for kw in _DOC_KEYWORDS)
+        is_data = (ext in _DATA_EXTS) and not is_doc
+
+        if is_doc:
+            result["documentation"].append(name)
+        elif is_data:
+            result["data"].append(name)
+        else:
+            result["other"].append(name)
+    return result
+
+
+def _field_is_empty(val: Any) -> bool:
+    return (
+        val is None
+        or (isinstance(val, list) and len(val) == 0)
+        or (isinstance(val, str) and not val.strip())
+    )
+
+
+def _get_source_url_for_datalumos_id(datalumos_id: str) -> "str | None":
+    """Return source_url from the pipeline DB for a given datalumos_id, or None."""
+    try:
+        con = sqlite3.connect(_get_db_path())
+        con.row_factory = sqlite3.Row
+        row = con.execute(
+            "SELECT source_url FROM projects WHERE datalumos_id=?", (datalumos_id,)
+        ).fetchone()
+        con.close()
+        return row["source_url"] if row else None
+    except Exception:
+        return None
+
+
+# Maps source URL domain suffixes to keywords to look for in spreadsheet tab names.
+# Longer / more-specific patterns should come first.
+_DOMAIN_TAB_KEYWORDS: "list[tuple[str, list[str]]]" = [
+    ("ers.usda.gov",        ["usda", "ers"]),
+    ("nass.usda.gov",       ["usda", "nass"]),
+    ("usda.gov",            ["usda"]),
+    ("data.cms.gov",        ["cms"]),
+    ("cms.gov",             ["cms"]),
+    ("data.cdc.gov",        ["cdc"]),
+    ("cdc.gov",             ["cdc"]),
+    ("catalog.data.gov",    ["catalog"]),
+    ("data.gov",            ["catalog", "data.gov"]),
+    ("nih.gov",             ["nih"]),
+    ("hhs.gov",             ["hhs"]),
+    ("epa.gov",             ["epa"]),
+    ("census.gov",          ["census"]),
+    ("bls.gov",             ["bls"]),
+    ("fda.gov",             ["fda"]),
+    ("dol.gov",             ["dol"]),
+    ("doi.gov",             ["doi"]),
+    ("noaa.gov",            ["noaa"]),
+    ("nasa.gov",            ["nasa"]),
+]
+
+
+def _list_sheet_tab_names(sheet_id: str) -> "list[str]":
+    """
+    Download the spreadsheet as XLSX and return just the tab names.
+
+    Uses the public XLSX export — no authentication required for world-readable
+    sheets. Note: the XLSX sheetId does NOT match the URL ?gid= value; we only
+    use this to get names, then resolve GIDs separately via the Sheets API.
+    """
+    import io as _io
+    import zipfile
+    from xml.etree import ElementTree as ET
+
+    xlsx_url = (
+        f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+    )
+    resp = requests.get(xlsx_url, headers=BROWSER_HEADERS, timeout=60)
+    resp.raise_for_status()
+
+    with zipfile.ZipFile(_io.BytesIO(resp.content)) as zf:
+        with zf.open("xl/workbook.xml") as wbf:
+            tree = ET.parse(wbf)
+
+    ns = {"ns": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    return [s.get("name", "") for s in tree.findall(".//ns:sheet", ns)]
+
+
+def _find_tab_gid_for_source_url(
+    sheet_id: str, source_url: str
+) -> "tuple[str | None, str | None]":
+    """
+    Auto-detect the spreadsheet tab GID for a given source URL.
+
+    Steps:
+    1. Map the source URL domain to keyword(s) via _DOMAIN_TAB_KEYWORDS.
+    2. Fetch the XLSX to get all tab names (no auth needed).
+    3. Find the first tab name containing a matching keyword.
+    4. Resolve that name to a GID via the Google Sheets API (uses credentials
+       from config.json if available).
+
+    Returns (tab_name, gid), or (None, None) if detection fails.
+    """
+    from urllib.parse import urlparse
+
+    domain = urlparse(source_url).netloc.lower().lstrip("www.")
+
+    keywords: "list[str]" = []
+    for pattern, kws in _DOMAIN_TAB_KEYWORDS:
+        if domain == pattern or domain.endswith("." + pattern) or pattern in domain:
+            keywords = kws
+            break
+    if not keywords:
+        keywords = [p for p in domain.split(".") if p not in ("www", "data", "gov", "org")][:1]
+    if not keywords:
+        return None, None
+
+    try:
+        tab_names = _list_sheet_tab_names(sheet_id)
+    except Exception:
+        return None, None
+
+    matched_name: "str | None" = None
+    for name in tab_names:
+        if any(kw in name.lower() for kw in keywords):
+            matched_name = name
+            break
+
+    if not matched_name:
+        return None, None
+
+    # Resolve name → GID via the Google Sheets API
+    try:
+        from utils.sheet_url_utils import get_gid_for_sheet_name
+        from pathlib import Path as _Path
+        config = _read_config()
+        creds_raw = config.get("google_credentials", "")
+        creds_path = _Path(creds_raw) if creds_raw else None
+        gid = get_gid_for_sheet_name(sheet_id, matched_name, creds_path)
+        if gid:
+            return matched_name, gid
+    except Exception:
+        pass
+
+    return matched_name, None
+
+
+@mcp.tool()
+def compare_collection_quality(
+    datalumos_url: str,
+    sheet_id: str = "",
+    sheet_gid: str = "",
+    num_controls: int = 3,
+) -> str:
+    """
+    Evaluate collection quality by comparing a DataLumos project against others
+    completed by different people.
+
+    Scrapes the treatment project's public DataLumos page and compares:
+    - Metadata completeness (which fields are set vs missing relative to controls)
+    - File types (are data dictionaries, usage guides, etc. missing?)
+
+    Works without authentication — uses the public /project/{id}/version/V1/view page.
+
+    If sheet_gid is omitted, the tool auto-detects the right spreadsheet tab by
+    matching the project's source URL domain against known tab names (e.g. cms.gov
+    → "CMS - Done").
+
+    Args:
+        datalumos_url:  DataLumos URL or numeric project ID (the project to evaluate)
+        sheet_id:       Google Sheets document ID for the inventory spreadsheet.
+                        If empty, uses google_sheet_id from config.json.
+        sheet_gid:      Worksheet GID (visible in sheet URL as ?gid=NNNN).
+                        Auto-detected from source URL domain when omitted.
+        num_controls:   How many comparison projects to use (default 3)
+    """
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT))
+
+        # ── 1. Identify treatment project ─────────────────────────────────────
+        project_id = _extract_project_id(datalumos_url)
+        if not project_id:
+            return (
+                f"Error: could not extract a DataLumos project ID from {datalumos_url!r}.\n"
+                "Expected a URL like https://www.datalumos.org/datalumos/project/246966/... "
+                "or a bare numeric ID."
+            )
+
+        # ── 2. Resolve sheet_id from config; auto-detect tab if gid not given ──
+        if not sheet_id:
+            sheet_id = _read_config().get("google_sheet_id", "")
+
+        auto_tab_note = ""
+        if sheet_id and not sheet_gid:
+            source_url = _get_source_url_for_datalumos_id(project_id)
+            if source_url:
+                tab_name, detected_gid = _find_tab_gid_for_source_url(sheet_id, source_url)
+                if detected_gid:
+                    sheet_gid = detected_gid
+                    auto_tab_note = f"  (tab auto-detected: \"{tab_name}\" gid={sheet_gid})"
+                else:
+                    auto_tab_note = f"  (no matching tab found for {source_url!r})"
+            else:
+                auto_tab_note = "  (project not in local DB — cannot auto-detect tab)"
+
+        # ── 3. Scrape treatment project via public view (no auth needed) ───────
+        from tests.compare_datalumos import read_project_public_view
+
+        treatment = read_project_public_view(project_id)
+        treatment_title = (treatment.get("title") or f"Project {project_id}").strip()
+
+        # ── 4. Find and scrape control projects ────────────────────────────────
+        controls: list = []
+        treatment_claimant: "str | None" = None
+
+        if sheet_id and sheet_gid:
+            treatment_claimant, control_stubs = _fetch_controls_from_sheet(
+                sheet_id, sheet_gid, project_id, num_controls
+            )
+            for stub in control_stubs:
+                try:
+                    ctrl = read_project_public_view(stub["project_id"])
+                    ctrl["_project_id"] = stub["project_id"]
+                    ctrl["_claimant"] = stub["claimant"]
+                    ctrl["_source_url"] = stub["source_url"]
+                    controls.append(ctrl)
+                except Exception as exc:
+                    controls.append({
+                        "_project_id": stub["project_id"],
+                        "_claimant": stub["claimant"],
+                        "_error": str(exc),
+                    })
+
+        valid_controls = [c for c in controls if not c.get("_error")]
+
+        # ── 5. Build report header ─────────────────────────────────────────────
+        lines = ["=== Collection Quality Report ==="]
+        treatment_line = f"  Treatment : DataLumos #{project_id}  \"{treatment_title}\""
+        if treatment_claimant:
+            treatment_line += f"  (claimed by: {treatment_claimant})"
+        lines.append(treatment_line)
+        if auto_tab_note:
+            lines.append(auto_tab_note)
+
+        if valid_controls:
+            ctrl_desc = ", ".join(
+                f"#{c['_project_id']} ({c.get('_claimant', '?')})" for c in valid_controls
+            )
+            lines.append(f"  Controls  : {ctrl_desc}")
+        elif controls:
+            lines.append(f"  Controls  : {len(controls)} found but all failed to scrape")
+        elif sheet_id and sheet_gid:
+            lines.append("  Controls  : none found in spreadsheet tab")
+        else:
+            lines.append(
+                "  Controls  : none (provide sheet_id to compare against other people's work)"
+            )
+        lines.append("")
+
+        # ── 6. Metadata completeness ───────────────────────────────────────────
+        lines.append("── Metadata Completeness ──")
+
+        metadata_fields = [
+            ("title",               "Title"),
+            ("agency",              "Agency"),
+            ("summary",             "Summary"),
+            ("keywords",            "Keywords / Subject Terms"),
+            ("geographic_coverage", "Geographic Coverage"),
+            ("time_period",         "Time Period"),
+            ("data_types",          "Data Types"),
+            ("collection_notes",    "Collection Notes"),
+        ]
+
+        fails = warns = oks = skips = 0
+
+        for key, label in metadata_fields:
+            t_val = treatment.get(key)
+            t_empty = _field_is_empty(t_val)
+
+            if not valid_controls:
+                # No controls — just show what's present
+                if t_empty:
+                    lines.append(f"  ✗  {label:<32} not set")
+                    fails += 1
+                else:
+                    preview = str(t_val)
+                    if len(preview) > 70:
+                        preview = preview[:70] + "…"
+                    lines.append(f"  ✓  {label:<32} {preview}")
+                    oks += 1
+                continue
+
+            n_ctrl_set = sum(1 for c in valid_controls if not _field_is_empty(c.get(key)))
+            n = len(valid_controls)
+
+            if t_empty and n_ctrl_set == 0:
+                lines.append(f"  -  {label:<32} empty everywhere (skip)")
+                skips += 1
+            elif t_empty:
+                lines.append(f"  ✗  {label:<32} MISSING  ({n_ctrl_set}/{n} controls have it)")
+                fails += 1
+            elif n_ctrl_set == 0:
+                lines.append(f"  ✓  {label:<32} set  (controls all empty)")
+                oks += 1
+            else:
+                # Both sides have it — check quality for summary
+                if key == "summary":
+                    t_len = len((t_val or "").strip())
+                    c_lens = [
+                        len((c.get(key) or "").strip())
+                        for c in valid_controls
+                        if not _field_is_empty(c.get(key))
+                    ]
+                    avg = sum(c_lens) / len(c_lens) if c_lens else 0
+                    if avg > 0 and t_len < avg * 0.3:
+                        lines.append(
+                            f"  ✗  {label:<32} very short: {t_len} chars "
+                            f"vs controls avg {avg:.0f}"
+                        )
+                        fails += 1
+                    elif avg > 0 and t_len < avg * 0.7:
+                        lines.append(
+                            f"  ~  {label:<32} shorter: {t_len} chars "
+                            f"vs controls avg {avg:.0f}"
+                        )
+                        warns += 1
+                    else:
+                        lines.append(
+                            f"  ✓  {label:<32} {t_len} chars "
+                            f"(controls avg {avg:.0f})"
+                        )
+                        oks += 1
+                else:
+                    lines.append(f"  ✓  {label:<32} set")
+                    oks += 1
+
+        lines.append("")
+
+        # ── 7. File analysis ───────────────────────────────────────────────────
+        lines.append("── Files ──")
+        t_files = treatment.get("files") or []
+        t_cats = _categorize_files(t_files)
+
+        if not t_files:
+            lines.append("  ✗  No files found in treatment project")
+            fails += 1
+        else:
+            if t_cats["data"]:
+                sample = ", ".join(t_cats["data"][:4])
+                extra = f" (+{len(t_cats['data'])-4} more)" if len(t_cats["data"]) > 4 else ""
+                lines.append(f"  ✓  Data files ({len(t_cats['data'])}): {sample}{extra}")
+                oks += 1
+            else:
+                other_count = len(t_cats["other"])
+                lines.append(
+                    f"  ~  No recognized data files"
+                    + (f" ({other_count} unclassified files)" if other_count else "")
+                )
+                warns += 1
+
+            if t_cats["documentation"]:
+                docs_sample = ", ".join(t_cats["documentation"][:3])
+                lines.append(
+                    f"  ✓  Documentation ({len(t_cats['documentation'])}): {docs_sample}"
+                )
+                oks += 1
+            else:
+                lines.append("  ~  No documentation files (data dictionaries, guides, READMEs)")
+                warns += 1
+
+        # Compare against controls
+        if valid_controls:
+            ctrl_all_files = [f for c in valid_controls for f in (c.get("files") or [])]
+            ctrl_cats = _categorize_files(ctrl_all_files)
+
+            if not t_cats["documentation"] and ctrl_cats["documentation"]:
+                doc_examples = ctrl_cats["documentation"][:4]
+                lines.append(
+                    f"  ✗  Documentation missing; controls have: {', '.join(doc_examples)}"
+                )
+                fails += 1
+
+            c_file_counts = [len(c.get("files") or []) for c in valid_controls]
+            avg_c = sum(c_file_counts) / len(c_file_counts)
+            t_count = len(t_files)
+            if t_count == 0:
+                pass  # already reported above
+            elif t_count >= avg_c * 0.7:
+                lines.append(f"  ✓  File count: {t_count}  (controls avg {avg_c:.1f})")
+                oks += 1
+            else:
+                lines.append(f"  ~  File count: {t_count} vs controls avg {avg_c:.1f}")
+                warns += 1
+
+        lines.append("")
+
+        # ── 8. Summary ─────────────────────────────────────────────────────────
+        lines.append("── Summary ──")
+
+        if fails > 0:
+            rating = "RED"
+        elif warns > 0:
+            rating = "YELLOW"
+        else:
+            rating = "GREEN"
+
+        summary_parts: list = []
+        if oks:    summary_parts.append(f"{oks} OK")
+        if warns:  summary_parts.append(f"{warns} warnings")
+        if fails:  summary_parts.append(f"{fails} failures")
+        if skips:  summary_parts.append(f"{skips} skipped")
+
+        lines.append(f"  Overall: {rating}  ({', '.join(summary_parts)})")
+
+        # Actionable gaps
+        gap_lines: list = [
+            l for l in lines
+            if ("MISSING" in l or "missing" in l or "very short" in l)
+            and l.strip().startswith(("✗", "~"))
+        ]
+        if gap_lines:
+            lines.append("")
+            lines.append("  To improve:")
+            for gl in gap_lines:
+                lines.append(f"    • {gl.strip().lstrip('✗~ ').strip()}")
+
+        return "\n".join(lines)
+
+    except Exception as exc:
+        import traceback
+        return f"Error in compare_collection_quality: {exc}\n{traceback.format_exc()}"
+
+
 if __name__ == "__main__":
     mcp.run()
