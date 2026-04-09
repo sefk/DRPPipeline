@@ -48,6 +48,10 @@ MODULES: Dict[str, Dict[str, Any]] = {
         "prereq": "sourced",
         "class_name": "UsdaErsCollector",
     },
+    "fec_gov_collector": {
+        "prereq": "sourced",
+        "class_name": "FecGovCollector",
+    },
     "upload": {
         "prereq": "collected",
         "class_name": "DataLumosUploader",
