@@ -2,7 +2,7 @@
 
 This document describes how to use the pipeline. For installation, see [Setup](Setup.md).
 
-There are three ways to run the pipeline: the **MCP orchestration server** (AI-assisted, recommended), the **SPA GUI** (interactive collector and pipeline controls), and the **command line** (per-module invocation).
+There are three ways to run the pipeline: the **MCP orchestration server** (AI-assisted, recommended — usable from Claude Code, Claude Desktop, or a browser via LibreChat), the **SPA GUI** (interactive collector and pipeline controls), and the **command line** (per-module invocation).
 
 ---
 
@@ -24,6 +24,8 @@ The server is registered automatically for Claude Code via `.mcp.json`. For Clau
   }
 }
 ```
+
+For a browser-based demo, see [Running with LibreChat](#running-with-librechat) below.
 
 ### Available tools
 
@@ -376,6 +378,78 @@ compare_collection_quality(
 The tool is implemented in `mcp_collector_dev/server.py`. For details on how
 it works and how to extend the domain-to-tab mapping, see
 [collector-training.md](collector-training.md).
+
+---
+
+### Running with LibreChat
+
+[LibreChat] is an open-source chat UI with native MCP support. A
+self-contained Docker stack under [`librechat/`](../librechat/README.md)
+brings it up against this pipeline — no code changes to LibreChat needed,
+just a mounted configuration file.
+
+This is the recommended way to demo the pipeline to someone who doesn't
+have Claude Code or Claude Desktop installed.
+
+[LibreChat]: https://www.librechat.ai/
+
+#### Architecture
+
+```
+  Browser ──▶ LibreChat (Docker, :3081) ──SSE──▶ DRP MCP server (host, :8765)
+                │                                         │
+                ├─ mongo (Docker)                          ├─ config.json
+                └─ meilisearch (Docker)                    ├─ drp_pipeline.db
+                                                           └─ python main.py ...
+```
+
+LibreChat and its two dependencies (MongoDB, MeiliSearch) run in Docker.
+The MCP server stays on the host so it keeps access to the project venv,
+`config.json`, the SQLite database, and subprocess execution of
+`python main.py <module>`.
+
+#### One-time setup
+
+```bash
+cd librechat
+cp .env.example .env
+# edit .env to set ANTHROPIC_API_KEY
+```
+
+#### Launch
+
+```bash
+# terminal 1 — MCP server on the host
+.venv/bin/python mcp_server/server.py --transport sse --port 8765
+
+# terminal 2 — LibreChat stack
+cd librechat
+docker compose up -d
+```
+
+Open [http://localhost:3081](http://localhost:3081), register a local
+account, then start a chat with the default "DRP Pipeline (Claude)" spec.
+
+#### What you get
+
+- All 11 orchestration tools are available (`get_pipeline_stats`,
+  `list_projects`, `run_module`, etc.) with the same dry-run-first safety
+  model as Claude Code.
+- A system prompt that teaches the model to preview mutating operations
+  and wait for confirmation.
+- Conversation history persisted in MongoDB so demos survive restarts.
+
+#### Shut down
+
+```bash
+cd librechat
+docker compose down          # stop containers, keep data
+docker compose down -v       # also delete mongo/meili volumes
+```
+
+See [`librechat/README.md`](../librechat/README.md) for port details,
+troubleshooting, and how to also expose the `drp-collector-dev` MCP server
+through the same UI.
 
 ---
 

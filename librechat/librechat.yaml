@@ -1,0 +1,95 @@
+# LibreChat configuration for the DRP Pipeline MCP demo.
+#
+# Mounted into the LibreChat container at /app/librechat.yaml.
+# Docs: https://www.librechat.ai/docs/configuration/librechat_yaml
+
+version: "1.3.5"
+cache: true
+
+interface:
+  customWelcome: |
+    Welcome to the Data Rescue Project pipeline demo.
+    Ask the assistant to inspect, preview, and run pipeline modules using MCP tools.
+
+# Pre-configured model profile with a system prompt that teaches Claude how
+# to drive the DRP Pipeline MCP safely.
+modelSpecs:
+  enforce: false
+  prioritize: true
+  list:
+    - name: "drp-pipeline-claude"
+      label: "DRP Pipeline (Claude)"
+      description: >
+        Conversational driver for the Data Rescue Project pipeline.
+      default: true
+      # Pre-select the drp-pipeline MCP server for every new chat so users
+      # don't have to toggle it in the dropdown each time. Name must match
+      # the key under the top-level `mcpServers` block below.
+      mcpServers:
+        - drp-pipeline
+      preset:
+        endpoint: "anthropic"
+        model: "claude-sonnet-4-5-20250929"
+        # Note: Anthropic rejects `temperature` when extended thinking is on,
+        # which LibreChat may enable by default for Claude 4.x. Leave it unset.
+        max_tokens: 4096
+        modelLabel: "DRP Pipeline Assistant"
+        greeting: |
+          Hi! I'm wired up to the Data Rescue Project pipeline via MCP.
+
+          Try asking:
+          - "How's the pipeline looking?"
+          - "List projects that have errors."
+          - "Preview what the next cms_collector run would do."
+          - "Show me the file count for DRPID 5."
+
+          Mutating operations (run_module, update_project, delete_project,
+          set_project_status, clear_errors) default to dry-run. I'll show you
+          the preview and ask before executing for real.
+        promptPrefix: |
+          You are the Data Rescue Project pipeline assistant. You drive the
+          DRP Pipeline through the `drp-pipeline` MCP tools (orchestration) and
+          the `drp-collector-dev` MCP tools (collector development, when
+          configured).
+
+          BEHAVIOR
+          - Prefer read-only tools first (get_pipeline_stats, list_projects,
+            get_project, preview_sourcing, check_project_files).
+          - For any mutating tool (run_module, update_project, clear_errors,
+            set_project_status, delete_project), ALWAYS run dry_run=True first,
+            summarize the proposed change, and wait for explicit user approval
+            before re-running with dry_run=False.
+          - After running a module, call verify_module_run and summarize the
+            result in plain language.
+          - Keep answers concise. Cite DRPIDs and statuses when you have them.
+          - If a tool errors, surface the message verbatim and suggest the
+            next diagnostic step (e.g. inspect the project record, check
+            folder contents).
+
+# Allow LibreChat to reach MCP servers on the Docker host.
+mcpSettings:
+  allowedDomains:
+    - "host.docker.internal"
+    - "localhost"
+
+# MCP servers the assistant can call.
+#
+# The DRP Pipeline MCP server runs on the host in SSE mode. Start it before
+# bringing up Docker:
+#     ../.venv/bin/python ../mcp_server/server.py --transport sse --port 8765
+mcpServers:
+  drp-pipeline:
+    type: sse
+    url: "http://host.docker.internal:8765/sse"
+    timeout: 120000
+    headers:
+      X-Source: "librechat"
+
+  # Optional: collector development tools. Uncomment after starting the
+  # collector-dev server in SSE mode on port 8766:
+  #     ../.venv/bin/python ../mcp_collector_dev/server.py --transport sse --port 8766
+  #
+  # drp-collector-dev:
+  #   type: sse
+  #   url: "http://host.docker.internal:8766/sse"
+  #   timeout: 120000

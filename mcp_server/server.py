@@ -836,4 +836,39 @@ def _format_size(n: int) -> str:
 
 
 if __name__ == "__main__":
-    mcp.run()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="DRP Pipeline Orchestration MCP server")
+    parser.add_argument(
+        "--transport",
+        choices=("stdio", "sse", "streamable-http"),
+        default="stdio",
+        help="Transport mode. Default 'stdio' is for Claude Code / Desktop; "
+             "'sse' or 'streamable-http' serve over HTTP for clients like LibreChat.",
+    )
+    parser.add_argument("--host", default="0.0.0.0",
+                        help="Bind address for sse/streamable-http (default 0.0.0.0).")
+    parser.add_argument("--port", type=int, default=8765,
+                        help="Port for sse/streamable-http (default 8765).")
+    parser.add_argument("--allowed-host", action="append", default=[],
+                        help="Extra allowed Host header value (repeatable). "
+                             "Accepts 'host' or 'host:port' or 'host:*'.")
+    args = parser.parse_args()
+
+    if args.transport == "stdio":
+        mcp.run()
+    else:
+        # FastMCP reads host/port from its settings object
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        # Extend DNS-rebinding allowed hosts so clients like LibreChat running
+        # in Docker can reach us via host.docker.internal. Localhost is already
+        # allowed by FastMCP's defaults.
+        extra_hosts = [f"host.docker.internal:{args.port}", "host.docker.internal:*"]
+        extra_hosts.extend(args.allowed_host)
+        mcp.settings.transport_security.allowed_hosts.extend(extra_hosts)
+        mcp.settings.transport_security.allowed_origins.extend([
+            f"http://host.docker.internal:{args.port}",
+            "http://host.docker.internal:*",
+        ])
+        mcp.run(transport=args.transport)

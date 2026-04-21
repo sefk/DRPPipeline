@@ -38,7 +38,7 @@ There are two initial use cases we're building for.
 
 ### Architecture
 
-- **Transport**: `stdio` — compatible with Claude Desktop and Claude Code
+- **Transport**: `stdio` by default (Claude Desktop and Claude Code). Also supports `sse` and `streamable-http` for HTTP clients (LibreChat, remote agents), selected with `--transport`.
 - **DB access**: Reads `config.json` for `db_path` (falls back to `drp_pipeline.db` in project root); uses `sqlite3` directly to avoid singleton initialization overhead
 - **Module execution**: Runs `python main.py <module> [args]` via subprocess, same pattern as `interactive_collector/api_pipeline.py`
 
@@ -78,6 +78,23 @@ requirements.txt       # add: mcp>=1.0.0
 }
 ```
 
+**LibreChat** (HTTP transport, for Docker-hosted web UI): run the server in SSE mode on the host and point LibreChat at it. See [MCP 1 — LibreChat demo](#mcp-1--librechat-demo) below.
+
+### Running over HTTP (SSE / streamable-http)
+
+```bash
+# default: stdio (for Claude Code/Desktop)
+python mcp_server/server.py
+
+# HTTP server on :8765 (for LibreChat or any remote MCP client)
+python mcp_server/server.py --transport sse --port 8765
+
+# newer streamable-HTTP transport
+python mcp_server/server.py --transport streamable-http --port 8765
+```
+
+The `sse` and `streamable-http` modes enable DNS-rebinding protection with `localhost` and `host.docker.internal` pre-allowed on the configured port. Use `--allowed-host host:port` (repeatable) to add more.
+
 ### Tools
 
 #### Query tools (read-only)
@@ -116,6 +133,50 @@ requirements.txt       # add: mcp>=1.0.0
 - Dry-run responses are clearly labeled and describe exactly what *would* change.
 - `delete_project` and `set_project_status` show the full current record before any deletion/mutation.
 - Protected fields (`DRPID`, `source_url`, `datalumos_id`, `status`, `errors`, `warnings`, `published_url`) cannot be updated via `update_project`; use dedicated tools (`clear_errors`, `set_project_status`) for status/error fields.
+
+### MCP 1 — LibreChat demo
+
+A self-contained Docker stack under [`librechat/`][librechat-dir] brings up
+[LibreChat] as a browser UI for this MCP server. LibreChat runs in Docker
+and connects to the MCP server over SSE on the host.
+
+```
+  Browser ──▶ LibreChat (Docker, :3081) ──SSE──▶ DRP MCP server (host, :8765)
+                │
+                ├─ mongo (Docker)
+                └─ meilisearch (Docker)
+```
+
+**One-time setup:**
+
+```bash
+cd librechat
+cp .env.example .env
+# edit .env to set ANTHROPIC_API_KEY (and/or OPENAI_API_KEY)
+```
+
+**To demo:**
+
+```bash
+# terminal 1: MCP server on the host (uses project venv, config.json, SQLite db)
+.venv/bin/python mcp_server/server.py --transport sse --port 8765
+
+# terminal 2: LibreChat stack
+cd librechat
+docker compose up -d
+```
+
+Open [http://localhost:3081](http://localhost:3081), register a local
+account, and start a chat with the default "DRP Pipeline (Claude)" spec.
+The system prompt configures dry-run-first behavior for mutating tools.
+
+Why the MCP server runs on the host instead of in Docker: it needs the
+project venv, `config.json`, the SQLite db, and the ability to shell out to
+`python main.py <module>`. Keeping it on the host avoids rebuilding a
+container whenever the pipeline code changes.
+
+[LibreChat]: https://www.librechat.ai/
+[librechat-dir]: ../librechat/README.md
 
 ### Module registry (from `orchestration/Orchestrator.py`)
 

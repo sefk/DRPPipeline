@@ -1,0 +1,73 @@
+# LibreChat demo stack for the DRP Pipeline MCP orchestration server.
+#
+# Usage:
+#   cp .env.example .env     # fill in ANTHROPIC_API_KEY (and/or OPENAI_API_KEY)
+#   # Start the DRP Pipeline MCP server on the host (see README.md):
+#   ../.venv/bin/python ../mcp_server/server.py --transport sse --port 8765
+#   # Bring up LibreChat:
+#   docker compose up -d
+#   # Open http://localhost:3081 and register a local account.
+#
+# LibreChat connects to the MCP server on the host via host.docker.internal.
+# This keeps the MCP server running with access to the project venv, config.json,
+# and the SQLite database without rebuilding a container every time.
+
+services:
+  mongodb:
+    image: mongo:7
+    container_name: drp-librechat-mongo
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    command: --quiet --logpath /dev/null
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.12.3
+    container_name: drp-librechat-meili
+    restart: unless-stopped
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-drp_meili_dev_key_change_me}
+      MEILI_NO_ANALYTICS: "true"
+    volumes:
+      - meili_data:/meili_data
+
+  librechat:
+    image: ghcr.io/danny-avila/librechat:latest
+    container_name: drp-librechat
+    restart: unless-stopped
+    depends_on:
+      - mongodb
+      - meilisearch
+    ports:
+      - "${LIBRECHAT_PORT:-3081}:3080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3080"
+      ALLOW_REGISTRATION: "true"
+      ALLOW_SOCIAL_LOGIN: "false"
+
+      MONGO_URI: "mongodb://mongodb:27017/LibreChat"
+
+      SEARCH: "true"
+      MEILI_HOST: "http://meilisearch:7700"
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-drp_meili_dev_key_change_me}
+
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+
+      CREDS_KEY: ${CREDS_KEY:-f34be427ebb29de8d88c107a71546019685ed8b241d8f2ed00c3df97ad2566f0}
+      CREDS_IV: ${CREDS_IV:-e2341419ec3dd3d19b13a1a87fafcbfb}
+      JWT_SECRET: ${JWT_SECRET:-16f8c0ef4a5d391b26034086c628469d3f9f497f08163ab9b40137092f2909ef}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-eaa5191d9c2f78aac2e4e12e87bfb45e42289c9086ab8e5671a10e5b41487a76}
+
+      CONFIG_PATH: "/app/librechat.yaml"
+    volumes:
+      - ./librechat.yaml:/app/librechat.yaml:ro
+      - librechat_images:/app/client/public/images
+
+volumes:
+  mongo_data:
+  meili_data:
+  librechat_images:
